@@ -39,17 +39,13 @@ function buildReplyContext(email: Email): ProReplyContext {
   };
 }
 
-/**
- * Renders a single email in its own Pro tab. Fetches the email content on
- * mount via `email-store.fetchEmailContent` so the tab is self-sufficient -
- * it doesn't depend on what the Mail tab has selected.
- */
+/** Renders a single email in its own self-contained Pro tab. */
 export function ProEmailTabBody({ tabId, data }: ProEmailTabBodyProps) {
   const t = useTranslations();
   const tNotifications = useTranslations('notifications');
 
   const client = useAuthStore((s) => s.client);
-  const fetchEmailContent = useEmailStore((s) => s.fetchEmailContent);
+  const getClientForAccount = useAuthStore((s) => s.getClientForAccount);
   const deleteEmail = useEmailStore((s) => s.deleteEmail);
   const markAsRead = useEmailStore((s) => s.markAsRead);
   const toggleStar = useEmailStore((s) => s.toggleStar);
@@ -70,14 +66,23 @@ export function ProEmailTabBody({ tabId, data }: ProEmailTabBodyProps) {
 
   useEffect(() => {
     let cancelled = false;
-    if (!client) return;
+    const emailClient = data.accountId ? getClientForAccount(data.accountId) ?? client : client;
+    if (!emailClient) {
+      setIsLoading(false);
+      return;
+    }
     setIsLoading(true);
-    fetchEmailContent(client, data.emailId)
+    emailClient.getEmail(data.emailId, data.jmapAccountId)
       .then((loaded) => {
         if (cancelled) return;
-        setEmail(loaded);
-        if (loaded?.subject) {
-          updateTabTitle(tabId, loaded.subject);
+        const sourcedEmail = loaded ? {
+          ...loaded,
+          sourceClientAccountId: data.accountId || undefined,
+          sourceAccountId: data.jmapAccountId ?? emailClient.getAccountId(),
+        } : null;
+        setEmail(sourcedEmail);
+        if (sourcedEmail?.subject) {
+          updateTabTitle(tabId, sourcedEmail.subject);
         }
       })
       .catch((err) => {
@@ -89,7 +94,7 @@ export function ProEmailTabBody({ tabId, data }: ProEmailTabBodyProps) {
     return () => {
       cancelled = true;
     };
-  }, [client, data.emailId, fetchEmailContent, tabId, updateTabTitle]);
+  }, [client, data.accountId, data.emailId, data.jmapAccountId, getClientForAccount, tabId, updateTabTitle]);
 
   const currentMailboxRole = useMemo(() => {
     if (!email) return undefined;

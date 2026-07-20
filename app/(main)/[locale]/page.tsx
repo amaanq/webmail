@@ -306,6 +306,7 @@ export default function Home() {
     hasMoreEmails,
     fetchTagCounts,
     fetchEmailContent,
+    fetchThreadEmails,
     isUnifiedView,
     unifiedRole,
     scheduledEmails,
@@ -2567,11 +2568,6 @@ export default function Home() {
       setShowComposer(false);
     }
 
-    // Find the list-level email for metadata (accountId, scheduled flags, etc.)
-    // but don't select it yet — wait for the full fetch to avoid a toolbar flash
-    // caused by rendering with the stub (no bodyValues) then re-rendering with the full email.
-    const listEmail = activeEmails.find(e => e.id === email.id);
-
     setLoadingEmail(true);
 
     // On mobile, switch to viewer
@@ -2584,49 +2580,8 @@ export default function Home() {
       setTabletListVisible(false);
     }
 
-    // Fetch the full content
     try {
-      // In unified view each email carries its source reference: the login it is
-      // reachable through (`sourceClientAccountId`) and its owning JMAP account
-      // (`sourceAccountId`). Resolve both so we fetch from the server that actually
-      // owns it — works uniformly for personal and shared/group sources, since for
-      // personal the owning account equals the client's primary (no-op). (#281)
-      const sourceClientId = isUnifiedView ? listEmail?.sourceClientAccountId : undefined;
-      const perAccountClient = sourceClientId
-        ? useAuthStore.getState().getClientForAccount(sourceClientId)
-        : undefined;
-      const fetchClient = perAccountClient ?? client;
-
-      const accountId = isUnifiedView
-        ? listEmail?.sourceAccountId
-        : (() => {
-            // Non-unified: shared folders on the active client still need their
-            // owner accountId passed explicitly.
-            const mailbox = mailboxes.find(mb => mb.id === selectedMailbox);
-            return mailbox?.isShared ? mailbox.accountId : undefined;
-          })();
-
-      const fullEmail = await fetchClient.getEmail(email.id, accountId);
-      if (fullEmail) {
-        if (listEmail?.isScheduled) {
-          fullEmail.scheduledSendAt = listEmail.scheduledSendAt;
-          fullEmail.emailSubmissionId = listEmail.emailSubmissionId;
-          fullEmail.scheduledIdentityId = listEmail.scheduledIdentityId;
-          fullEmail.scheduledUndoStatus = listEmail.scheduledUndoStatus;
-          fullEmail.isScheduled = true;
-          fullEmail.isSmimeScheduled = listEmail.isSmimeScheduled;
-        }
-        // Re-stamp the source reference so later actions on the open email
-        // resolve to the right account (the fetched object lacks these).
-        if (isUnifiedView && listEmail) {
-          fullEmail.accountId = listEmail.accountId;
-          fullEmail.accountLabel = listEmail.accountLabel;
-          fullEmail.sourceClientAccountId = listEmail.sourceClientAccountId;
-          fullEmail.sourceAccountId = listEmail.sourceAccountId;
-        }
-        selectEmail(fullEmail);
-        // Mark-as-read logic is now handled by useEffect
-      }
+      await fetchEmailContent(client, email.id);
     } catch (error) {
       console.error('Failed to fetch email content:', error);
     } finally {
@@ -2671,28 +2626,8 @@ export default function Home() {
     setActiveView("viewer");
 
     try {
-      // In unified/aggregate views the thread may belong to another (possibly
-      // shared/group) account. Route the fetch to the login it's reachable
-      // through (`sourceClientAccountId`) and pass its owning JMAP account
-      // (`sourceAccountId`) so the thread loads from the right server instead of
-      // the active one (which doesn't have it → empty/body-less). (#281)
-      const ref = thread.emails?.[0];
-      const threadClient = isUnifiedView && ref?.sourceClientAccountId
-        ? (useAuthStore.getState().getClientForAccount(ref.sourceClientAccountId) ?? client)
-        : client;
-      const threadAccountId = isUnifiedView ? ref?.sourceAccountId : undefined;
-      const emails = await threadClient.getThreadEmails(thread.threadId, threadAccountId);
-      // Re-stamp the source reference so conversation actions (reply/move/…)
-      // resolve to the right account; the fetched objects don't carry it.
-      if (isUnifiedView && ref) {
-        for (const e of emails) {
-          e.accountId = ref.accountId;
-          e.accountLabel = ref.accountLabel;
-          e.sourceClientAccountId = ref.sourceClientAccountId;
-          e.sourceAccountId = ref.sourceAccountId;
-        }
-      }
-      setConversationEmails(emails);
+      const emails = await fetchThreadEmails(client, thread.threadId);
+      setConversationEmails(emails.length > 0 ? emails : thread.emails);
     } catch (error) {
       console.error('Failed to fetch thread emails:', error);
       // Fall back to thread.emails
@@ -3186,7 +3121,8 @@ export default function Home() {
                 onEmailSelect={handleEmailSelect}
                 onEmailDoubleClick={isEmbedded ? ((email) => {
                   useProTabStore.getState().openEmailTab({
-                    accountId: email.accountId ?? '',
+                    accountId: email.sourceClientAccountId ?? viewingAccountId ?? activeAccountId ?? '',
+                    jmapAccountId: email.sourceAccountId,
                     emailId: email.id,
                     mailboxId: selectedMailbox,
                     title: email.subject?.trim() || t('email_composer.new_message'),

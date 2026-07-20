@@ -55,6 +55,7 @@ export interface ProComposeTabData {
 
 export interface ProEmailTabData {
   accountId: string;
+  jmapAccountId?: string;
   emailId: string;
   mailboxId: string | null;
   title: string;

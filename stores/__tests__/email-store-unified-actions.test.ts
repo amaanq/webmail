@@ -287,4 +287,24 @@ describe('unified-view single-email action routing (#281)', () => {
     expect(activeClient.markAsRead).toHaveBeenCalledWith('email-a', true, undefined);
     expect(accountBClient.markAsRead).not.toHaveBeenCalled();
   });
+
+  it('keeps source routing after leaving the account view', async () => {
+    useEmailStore.setState({
+      isUnifiedView: false,
+      viewingAccountId: null,
+      emails: [
+        makeEmail({
+          id: 'email-b',
+          sourceClientAccountId: 'account-b',
+          sourceAccountId: 'account-b',
+          mailboxIds: { 'b-inbox': true },
+        }),
+      ],
+    });
+
+    await useEmailStore.getState().markAsRead(activeClient, 'email-b', true);
+
+    expect(accountBClient.markAsRead).toHaveBeenCalledWith('email-b', true, 'account-b');
+    expect(activeClient.markAsRead).not.toHaveBeenCalled();
+  });
 });

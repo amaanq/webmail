@@ -34,6 +34,7 @@ import { useTranslations } from "next-intl";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useContactStore } from "@/stores/contact-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { resolveEmailActionContext } from "@/stores/email-store";
 import { isFilePreviewable } from "@/lib/file-preview";
 
 interface ThreadConversationViewProps {
@@ -246,6 +247,9 @@ function EmailCard({
   const [hasBlockedContent, setHasBlockedContent] = useState(false);
   const [cidBlobUrls, setCidBlobUrls] = useState<Record<string, string>>({});
   const { client } = useAuthStore();
+  const blobContext = client ? resolveEmailActionContext(email, client) : null;
+  const blobClient = blobContext?.client ?? client;
+  const blobAccountId = blobContext?.accountId;
 
   // Mark as read when email is expanded
   useEffect(() => {
@@ -277,10 +281,12 @@ function EmailCard({
 
   // Fetch inline CID images with authentication to prevent browser auth dialogs
   useEffect(() => {
-    if (!client || !email?.attachments) {
+    const fetchClient = blobClient;
+    if (!fetchClient || !email?.attachments) {
       setCidBlobUrls({});
       return;
     }
+    const fetchBlobAsObjectUrl = fetchClient.fetchBlobAsObjectUrl.bind(fetchClient);
 
     const cidAttachments = email.attachments.filter(att => att.cid && att.blobId);
     if (cidAttachments.length === 0) {
@@ -296,7 +302,12 @@ function EmailCard({
       await Promise.all(cidAttachments.map(async (att) => {
         const cidValue = att.cid!.replace(/^<|>$/g, '');
         try {
-          const objectUrl = await client!.fetchBlobAsObjectUrl(att.blobId, att.name || 'inline', att.type);
+          const objectUrl = await fetchBlobAsObjectUrl(
+            att.blobId,
+            att.name || 'inline',
+            att.type,
+            blobAccountId,
+          );
           if (!cancelled) {
             urls[cidValue] = objectUrl;
             objectUrls.push(objectUrl);
@@ -318,7 +329,7 @@ function EmailCard({
       cancelled = true;
       objectUrls.forEach(url => URL.revokeObjectURL(url));
     };
-  }, [client, email?.id, email?.attachments]);
+  }, [blobClient, blobAccountId, email?.id, email?.attachments]);
 
   // Sanitize and prepare email HTML content
   const emailContent = useMemo(() => {
