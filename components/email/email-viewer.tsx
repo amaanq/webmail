@@ -79,7 +79,7 @@ import { toast } from "@/stores/toast-store";
 import { useDeviceDetection } from "@/hooks/use-media-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAccountStore } from "@/stores/account-store";
-import { useEmailStore } from "@/stores/email-store";
+import { resolveEmailActionContext, useEmailStore } from "@/stores/email-store";
 import { useThemeStore } from "@/stores/theme-store";
 import { EmailIdentityBadge } from "./email-identity-badge";
 import { UnsubscribeBanner } from "./unsubscribe-banner";
@@ -717,18 +717,9 @@ export function EmailViewer({
   const { tabletListVisible } = useUIStore();
   const { identities, client, isDemoMode, activeAccountId } = useAuthStore();
   const activeAccount = useAccountStore((s) => s.accounts.find((a) => a.id === activeAccountId));
-  // Blobs (inline images, drag-out, TNEF, embedded messages, thumbnails, bundle
-  // downloads) are account-scoped. In the unified / All-Mail view the open
-  // message may belong to another login (route to its client) or a delegated
-  // shared account (same client, owner accountId in the URL). Resolve both from
-  // the message's source so cross-account blob fetches don't 404 against the
-  // active account.
-  const isUnifiedView = useEmailStore((s) => s.isUnifiedView);
-  const blobClient = useMemo(() => {
-    const scid = isUnifiedView ? email?.sourceClientAccountId : undefined;
-    return (scid ? useAuthStore.getState().getClientForAccount(scid) : null) ?? client;
-  }, [isUnifiedView, email?.sourceClientAccountId, client]);
-  const blobAccountId = isUnifiedView ? email?.sourceAccountId : undefined;
+  const blobContext = client && email ? resolveEmailActionContext(email, client) : null;
+  const blobClient = blobContext?.client ?? client;
+  const blobAccountId = blobContext?.accountId;
 
   // List-Unsubscribe mailto: send the message ourselves - this is a webmail
   // client, handing a mailto: URL to the OS mail handler goes nowhere for

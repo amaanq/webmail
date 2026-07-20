@@ -376,41 +376,18 @@ function resolveCrossIncludedMailboxIds(accountId: string, ownMailboxes: Mailbox
   return ownMailboxes.filter((mb) => selected.has(mb.id)).map((mb) => mb.id);
 }
 
-/**
- * Resolves the JMAP client, mailbox list, and JMAP accountId to use for a
- * single-email action.
- *
- * In aggregate views each email is decorated with its source reference:
- * `sourceClientAccountId` (the logged-in client it is reachable through) and
- * `sourceAccountId` (the owning JMAP account). The mutation must be routed to
- * that client/account, or it is sent to the active account whose server doesn't
- * know the id, so JMAP `Email/set` silently returns `notUpdated` and the change
- * is lost on the next reload (issue #281). We always pass `sourceAccountId` as
- * the JMAP accountId: for personal sources it equals the client's primary (a
- * no-op, no namespacing), for shared/group sources it targets the owner. The
- * owner's mailbox list (cached by `buildUnifiedAccountClients` under that JMAP
- * id) resolves role-based destinations like trash/archive.
- *
- * For the normal single-account / viewing-account flow this preserves the
- * existing behavior exactly: the active/viewing client, its mailbox list, and
- * the shared-mailbox accountId derived from the currently selected mailbox.
- */
-function resolveEmailActionContext(
+/** Routes an email action through the client and JMAP account that owns it. */
+export function resolveEmailActionContext(
   email: { sourceClientAccountId?: string; sourceAccountId?: string },
   passedClient: IJMAPClient,
 ): { client: IJMAPClient; mailboxes: Mailbox[]; accountId: string | undefined } {
   const state = useEmailStore.getState();
-  // In aggregate views every email is decorated with its source reference:
-  // `sourceClientAccountId` (the login client it is reachable through) and
-  // `sourceAccountId` (the owning JMAP account). These are unambiguous across
-  // personal and shared/group sources, so resolution is the same three lines for
-  // both - no id-space guessing, no capability scan. For personal sources
-  // `sourceAccountId` equals the client's primary, so passing it to JMAP is a
-  // no-op (matches the previous `accountId: undefined` behavior exactly).
-  if (state.isUnifiedView && email.sourceClientAccountId && email.sourceAccountId) {
+  if (email.sourceClientAccountId && email.sourceAccountId) {
     return {
       client: useAuthStore.getState().getClientForAccount(email.sourceClientAccountId) ?? resolveActionClient(passedClient),
-      mailboxes: state.accountMailboxes[email.sourceAccountId] ?? state.mailboxes,
+      mailboxes: state.accountMailboxes[email.sourceAccountId]
+        ?? state.accountMailboxes[email.sourceClientAccountId]
+        ?? state.mailboxes,
       accountId: email.sourceAccountId,
     };
   }
@@ -420,6 +397,27 @@ function resolveEmailActionContext(
     client: resolveActionClient(passedClient),
     mailboxes,
     accountId: currentMailbox?.isShared ? currentMailbox.accountId : undefined,
+  };
+}
+
+function stampEmailSource(
+  email: Email,
+  client: IJMAPClient,
+  accountId: string | undefined,
+  source?: Email,
+): Email {
+  const sourceClientAccountId = source?.sourceClientAccountId
+    ?? useEmailStore.getState().viewingAccountId
+    ?? useAuthStore.getState().activeAccountId
+    ?? undefined;
+
+  return {
+    ...email,
+    accountId: source?.accountId ?? email.accountId,
+    accountLabel: source?.accountLabel ?? email.accountLabel,
+    sourceClientAccountId,
+    sourceAccountId: source?.sourceAccountId ?? accountId ?? client.getAccountId(),
+    sourceFolder: source?.sourceFolder ?? email.sourceFolder,
   };
 }
 
@@ -1257,8 +1255,9 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       const email = await actionClient.getEmail(emailId, accountId);
 
       if (email) {
-        const annotatedEmail = annotateScheduledEmail(email, get().scheduledSubmissionByEmailId);
-        set({ selectedEmail: annotatedEmail });
+        const sourcedEmail = stampEmailSource(email, actionClient, accountId, listEmail);
+        const annotatedEmail = annotateScheduledEmail(sourcedEmail, get().scheduledSubmissionByEmailId);
+        get().selectEmail(annotatedEmail);
         return annotatedEmail;
       }
       return email;
@@ -2978,29 +2977,23 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       // thread (handles shared/group accounts); otherwise fall back to the
       // selected-mailbox shared-folder logic. (#281)
       const threadEmail = get().emails.find(e => e.threadId === threadId);
-      let actionClient = resolveActionClient(client);
-      let accountId: string | undefined;
-      if (get().isUnifiedView && threadEmail?.sourceClientAccountId && threadEmail?.sourceAccountId) {
-        actionClient = useAuthStore.getState().getClientForAccount(threadEmail.sourceClientAccountId) ?? actionClient;
-        accountId = threadEmail.sourceAccountId;
-      } else {
-        const mailbox = mailboxes.find(mb => mb.id === selectedMailbox);
-        accountId = mailbox?.isShared ? mailbox.accountId : undefined;
-      }
+      const context = threadEmail
+        ? resolveEmailActionContext(threadEmail, client)
+        : (() => {
+            const mailbox = mailboxes.find(mb => mb.id === selectedMailbox);
+            return {
+              client: resolveActionClient(client),
+              accountId: mailbox?.isShared ? mailbox.accountId : undefined,
+            };
+          })();
 
       // Fetch all emails in the thread
-      const emails = await actionClient.getThreadEmails(threadId, accountId);
+      const fetchedEmails = await context.client.getThreadEmails(threadId, context.accountId);
 
       // Re-stamp the source reference so actions on thread emails resolve to the
       // right account (the fetched objects don't carry it).
-      if (get().isUnifiedView && threadEmail) {
-        for (const e of emails) {
-          e.accountId = threadEmail.accountId;
-          e.accountLabel = threadEmail.accountLabel;
-          e.sourceClientAccountId = threadEmail.sourceClientAccountId;
-          e.sourceAccountId = threadEmail.sourceAccountId;
-        }
-      }
+      const emails = fetchedEmails.map((email) =>
+        stampEmailSource(email, context.client, context.accountId, threadEmail));
 
       // Update cache
       const newCache = new Map(get().threadEmailsCache);
