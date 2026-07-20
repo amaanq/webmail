@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useMemo } from 'react';
 import { useTranslations } from 'next-intl';
-import { Check, GripVertical, Plus, Star, AlertCircle, ChevronRight } from 'lucide-react';
+import { Check, GripVertical, Plus, Star, AlertCircle, ChevronRight, Pencil, X } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth-store';
 import { useEmailStore } from '@/stores/email-store';
 import { useAccountStore, type AccountEntry } from '@/stores/account-store';
@@ -31,6 +31,7 @@ function firstScopedTab(caps: SharedAccount['capabilities']): string | null {
 
 export function AccountSettings() {
   const t = useTranslations('settings.account');
+  const tCommon = useTranslations('common');
   const router = useRouter();
   const { username, serverUrl, isDemoMode, primaryIdentity, authMode, client } = useAuthStore();
   const activeAccountId = useAuthStore((s) => s.activeAccountId);
@@ -47,6 +48,7 @@ export function AccountSettings() {
   const accounts = useAccountStore((s) => s.accounts);
   const setDefaultAccount = useAccountStore((s) => s.setDefaultAccount);
   const reorderAccounts = useAccountStore((s) => s.reorderAccounts);
+  const updateAccount = useAccountStore((s) => s.updateAccount);
   const account = useAccountStore((s) => activeAccountId ? s.getAccountById(activeAccountId) : undefined);
 
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -201,6 +203,7 @@ export function AccountSettings() {
                 onMoveDown={() => moveAccount(index, index + 1)}
                 onSwitch={() => handleSwitch(a.id)}
                 onSetDefault={() => setDefaultAccount(a.id)}
+                onRename={(label) => updateAccount(a.id, { label })}
                 labels={{
                   active: t('accounts.active'),
                   default: t('accounts.default_badge'),
@@ -209,6 +212,9 @@ export function AccountSettings() {
                   moveUp: t('accounts.move_up'),
                   moveDown: t('accounts.move_down'),
                   dragHandle: t('accounts.drag_handle'),
+                  edit: tCommon('edit'),
+                  save: tCommon('save'),
+                  cancel: tCommon('cancel'),
                 }}
               />
             ))}
@@ -284,6 +290,7 @@ interface AccountRowProps {
   onMoveDown: () => void;
   onSwitch: () => void;
   onSetDefault: () => void;
+  onRename: (label: string) => void;
   labels: {
     active: string;
     default: string;
@@ -292,6 +299,9 @@ interface AccountRowProps {
     moveUp: string;
     moveDown: string;
     dragHandle: string;
+    edit: string;
+    save: string;
+    cancel: string;
   };
 }
 
@@ -310,11 +320,31 @@ function AccountRow({
   onMoveDown,
   onSwitch,
   onSetDefault,
+  onRename,
   labels,
 }: AccountRowProps) {
+  const accountLabel = account.label || account.displayName || account.email || account.username;
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftLabel, setDraftLabel] = useState(accountLabel);
+
+  const startEditing = () => {
+    setDraftLabel(accountLabel);
+    setIsEditing(true);
+  };
+  const cancelEditing = () => {
+    setDraftLabel(accountLabel);
+    setIsEditing(false);
+  };
+  const saveLabel = () => {
+    const label = draftLabel.trim();
+    if (!label) return;
+    onRename(label);
+    setIsEditing(false);
+  };
+
   return (
     <div
-      draggable
+      draggable={!isEditing}
       onDragStart={(e) => onDragStart(e, index)}
       onDragOver={(e) => onDragOver(e, index)}
       onDrop={(e) => onDrop(e, index)}
@@ -337,7 +367,7 @@ function AccountRow({
 
       <div className="relative flex-shrink-0">
         <Avatar
-          name={account.displayName || account.label}
+          name={accountLabel}
           email={account.email || account.username}
           size="sm"
           className="w-9 h-9 text-sm"
@@ -351,43 +381,98 @@ function AccountRow({
         )}
       </div>
 
-      <button
-        type="button"
-        onClick={onSwitch}
-        disabled={isActive}
-        className={cn(
-          'min-w-0 flex-1 text-start',
-          !isActive && 'cursor-pointer'
-        )}
-        title={isActive ? labels.active : labels.switchTo}
-      >
-        <div className="flex items-center gap-1.5">
-          <span className="text-sm font-medium truncate">
-            {account.displayName || account.label}
-          </span>
-          {account.isDefault && (
-            <Star className="w-3 h-3 text-amber-500 flex-shrink-0 fill-amber-500" aria-label={labels.default} />
+      {isEditing ? (
+        <form
+          className="min-w-0 flex-1 flex items-center gap-1.5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveLabel();
+          }}
+        >
+          <div className="min-w-0 flex-1">
+            <input
+              autoFocus
+              value={draftLabel}
+              maxLength={80}
+              onChange={(event) => setDraftLabel(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  cancelEditing();
+                }
+              }}
+              aria-label={labels.edit}
+              className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-medium outline-none focus:ring-2 focus:ring-ring"
+            />
+            <p className="mt-0.5 text-xs text-muted-foreground truncate">
+              {account.email || account.username}
+            </p>
+          </div>
+          <button
+            type="submit"
+            disabled={!draftLabel.trim()}
+            className="p-1.5 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+            title={labels.save}
+            aria-label={labels.save}
+          >
+            <Check className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={cancelEditing}
+            className="p-1.5 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            title={labels.cancel}
+            aria-label={labels.cancel}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </form>
+      ) : (
+        <button
+          type="button"
+          onClick={onSwitch}
+          disabled={isActive}
+          className={cn(
+            'min-w-0 flex-1 text-start',
+            !isActive && 'cursor-pointer'
           )}
-        </div>
-        <p className="text-xs text-muted-foreground truncate">
-          {account.email || account.username}
-        </p>
-        <div className="flex items-center gap-1 mt-0.5">
-          {account.hasError ? (
-            <AlertCircle className="w-3 h-3 text-destructive" />
-          ) : (
-            <span className={cn(
-              'w-1.5 h-1.5 rounded-full',
-              account.isConnected ? 'bg-green-500' : 'bg-muted-foreground/40'
-            )} />
-          )}
-          <span className="text-[10px] text-muted-foreground truncate">
-            {hostnameOf(account.serverUrl)}
-          </span>
-        </div>
-      </button>
+          title={isActive ? labels.active : labels.switchTo}
+        >
+          <div className="flex items-center gap-1.5">
+            <span className="text-sm font-medium truncate">{accountLabel}</span>
+            {account.isDefault && (
+              <Star className="w-3 h-3 text-amber-500 flex-shrink-0 fill-amber-500" aria-label={labels.default} />
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground truncate">
+            {account.email || account.username}
+          </p>
+          <div className="flex items-center gap-1 mt-0.5">
+            {account.hasError ? (
+              <AlertCircle className="w-3 h-3 text-destructive" />
+            ) : (
+              <span className={cn(
+                'w-1.5 h-1.5 rounded-full',
+                account.isConnected ? 'bg-green-500' : 'bg-muted-foreground/40'
+              )} />
+            )}
+            <span className="text-[10px] text-muted-foreground truncate">
+              {hostnameOf(account.serverUrl)}
+            </span>
+          </div>
+        </button>
+      )}
 
-      <div className="flex items-center gap-0.5 flex-shrink-0">
+      {!isEditing && <div className="flex items-center gap-0.5 flex-shrink-0">
+        <button
+          type="button"
+          onClick={startEditing}
+          className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+          title={labels.edit}
+          aria-label={labels.edit}
+        >
+          <Pencil className="w-3.5 h-3.5" />
+        </button>
         {!account.isDefault && (
           <button
             type="button"
@@ -423,7 +508,7 @@ function AccountRow({
             <path d="M4 6l4 4 4-4" />
           </svg>
         </button>
-      </div>
+      </div>}
     </div>
   );
 }

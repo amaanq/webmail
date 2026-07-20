@@ -369,6 +369,7 @@ function SidebarRow({
 
 function SidebarSectionHeader({
   label,
+  description,
   expanded,
   onToggle,
   onSettings,
@@ -380,6 +381,7 @@ function SidebarSectionHeader({
   testId,
 }: {
   label: string;
+  description?: string;
   expanded: boolean;
   onToggle: () => void;
   onSettings?: () => void;
@@ -418,8 +420,13 @@ function SidebarSectionHeader({
         <ChevronRight className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
       )}
       {icon && <span className="ms-1.5 flex-shrink-0">{icon}</span>}
-      <span className={cn(textClass, icon ? "ms-1.5" : "ms-1.5")}>
-        {label}
+      <span className="ms-1.5 min-w-0 flex-1 text-start">
+        <span className={cn("block", textClass)}>{label}</span>
+        {description && (
+          <span className="block text-[11px] leading-4 font-normal text-muted-foreground truncate">
+            {description}
+          </span>
+        )}
       </span>
       {onSettings && (
         <span
@@ -1102,10 +1109,13 @@ export function Sidebar({
           accountGroups.map(({ account, isActive, tree }) => {
             const expanded = !collapsedAccountGroups.has(account.id);
             const isViewing = isActive ? viewingAccountId === null : viewingAccountId === account.id;
+            const accountEmail = account.email || account.username;
+            const accountLabel = account.label || account.displayName || accountEmail;
             return (
               <div key={account.id} onContextMenu={isActive ? handleFoldersHeaderContextMenu : undefined}>
                 <SidebarSectionHeader
-                  label={account.label || account.email || account.username}
+                  label={accountLabel}
+                  description={accountEmail !== accountLabel ? accountEmail : undefined}
                   expanded={expanded}
                   onToggle={() => toggleAccountGroup(account.id)}
                   onSettings={isActive ? openFolderSettings : undefined}

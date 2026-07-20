@@ -21,7 +21,7 @@ interface AccountSwitcherProps {
 function AccountAvatar({ account, size = "sm" }: { account: AccountEntry; size?: "sm" | "md" }) {
   return (
     <Avatar
-      name={account.displayName || account.label}
+      name={account.displayName || account.email || account.label}
       email={account.email || account.username}
       size="sm"
       className={cn("flex-shrink-0", size === "md" && "w-9 h-9 text-sm")}
@@ -166,10 +166,9 @@ export function AccountSwitcher({ variant = "rail", className }: AccountSwitcher
     resetDrag();
   };
 
-  // Show the account's own identity, not the preferred sending identity -
-  // primaryIdentity can be an alias (e.g. info@korazo.net) that differs from
-  // the actually logged-in account (info@linusrath.de).
-  const displayName = activeAccount?.displayName || activeAccount?.label || "";
+  // `label` is a local account nickname. Keep it separate from the JMAP
+  // identity name, which is used when sending mail.
+  const displayName = activeAccount?.label || activeAccount?.displayName || "";
   const displayEmail = activeAccount?.email || activeAccount?.username || "";
 
   return (
@@ -263,7 +262,7 @@ export function AccountSwitcher({ variant = "rail", className }: AccountSwitcher
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1">
                       <span className="text-sm font-medium truncate">
-                        {account.displayName || account.label}
+                        {account.label || account.displayName}
                       </span>
                       {account.isDefault && (
                         <Star className="w-3 h-3 text-amber-500 flex-shrink-0 fill-amber-500" />
