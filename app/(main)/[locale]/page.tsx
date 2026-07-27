@@ -17,7 +17,7 @@ import { useAccountStore } from "@/stores/account-store";
 import { usePolicyStore } from "@/stores/policy-store";
 import type { UnifiedAccountClient } from "@/lib/unified-mailbox";
 import { KeyboardShortcutsModal } from "@/components/keyboard-shortcuts-modal";
-import { useEmailStore, buildUnifiedAccountClients } from "@/stores/email-store";
+import { useEmailStore, buildUnifiedAccountClients, ensureEmailActionContext } from "@/stores/email-store";
 import { toast } from "@/stores/toast-store";
 import { useAuthStore, redirectToLogin } from "@/stores/auth-store";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -1543,20 +1543,18 @@ export default function Home() {
   const handleDelete = async (emailToDelete: Email | null = selectedEmail) => {
     if (!client || !emailToDelete) return;
 
-    // In unified view the trash destination and current-folder check must come
-    // from the email's own account, not the active one. The owning account's
-    // mailbox list is cached under its JMAP id (`sourceAccountId`). (#281)
-    const actionMailboxes =
-      isUnifiedView && emailToDelete.sourceAccountId
-        ? (accountMailboxes[emailToDelete.sourceAccountId] ?? mailboxes)
-        : mailboxes;
+    // The trash destination and current-folder check must come from the
+    // email's own account, not the active one — fetched on demand when its
+    // list is not cached yet. (#281)
+    const { mailboxes: actionMailboxes, accountId: owningAccountId } =
+      await ensureEmailActionContext(emailToDelete, client);
 
     // Check if we're currently in the trash or junk folder. In unified view the
     // "current folder" is the unified role within the email's account.
     const currentMailbox = isUnifiedView
       ? (actionMailboxes.find(m => m.role === unifiedRole && emailToDelete.mailboxIds?.[m.id])
           ?? actionMailboxes.find(m => m.role === unifiedRole))
-      : mailboxes.find(m => m.id === selectedMailbox);
+      : actionMailboxes.find(m => m.id === selectedMailbox);
     const isInTrash = currentMailbox?.role === 'trash';
     const isInJunk = currentMailbox?.role === 'junk';
     const permanentlyDeleteJunk = useSettingsStore.getState().permanentlyDeleteJunk;
@@ -1581,9 +1579,8 @@ export default function Home() {
       // the trash lookup to the email's account: for a shared/group source every
       // mailbox in the list is `isShared`, so we match by accountId instead of
       // excluding shared (otherwise no trash is found and the delete fails). (#281)
-      const sourceAccountId = isUnifiedView ? emailToDelete.sourceAccountId : undefined;
       const matchesScope = (m: Mailbox) =>
-        sourceAccountId ? m.accountId === sourceAccountId : !m.isShared;
+        owningAccountId ? m.accountId === owningAccountId : !m.isShared;
       const trashMailbox =
         actionMailboxes.find(m => m.role === 'trash' && matchesScope(m)) ??
         actionMailboxes.find(m => {
