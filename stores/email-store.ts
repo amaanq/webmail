@@ -345,6 +345,26 @@ function resolveActionClient(passedClient: IJMAPClient): IJMAPClient {
   return c ?? passedClient;
 }
 
+/**
+ * The folder list the CURRENT VIEW is expressed in. `selectedMailbox` and any
+ * other view state is an id from this list, so it must never be looked up in
+ * another account's list: mailbox ids are only unique within an account, and
+ * compact ids (Stalwart's "a", "b", ...) repeat across them, so a foreign
+ * lookup can silently match an unrelated folder.
+ */
+export function getViewMailboxes(): Mailbox[] {
+  return resolveActionMailboxes();
+}
+
+/** Whether the email sits in a mailbox of `role` within its own account. */
+export function emailIsInRole(
+  email: { mailboxIds?: Record<string, boolean>; sourceAccountId?: string },
+  owningMailboxes: Mailbox[],
+  role: string,
+): boolean {
+  return owningMailboxes.some((mailbox) => mailbox.role === role && emailInMailbox(email, mailbox));
+}
+
 function resolveActionMailboxes(): Mailbox[] {
   const state = useEmailStore.getState();
   if (state.viewingAccountId) {
@@ -427,12 +447,19 @@ export async function ensureEmailActionContext(
   if (!(email.sourceClientAccountId && email.sourceAccountId) || context.mailboxes.length > 0) {
     return context;
   }
+  // Only a login that actually reaches the owning account may fill its cache.
+  // `resolveEmailActionContext` falls back to the active client when the
+  // owning login is gone, and fetching through that would cache the ACTIVE
+  // account's folders under the owner's key - exactly the mix-up this whole
+  // path exists to prevent.
+  const owningClient = useAuthStore.getState().getClientForAccount(email.sourceClientAccountId);
+  if (!owningClient) return context;
   // A shared/group owner has no login of its own, so its list must be fetched
   // (and cached) under the owner JMAP id through the delegating client.
-  const cacheKey = context.client.getAccountId() === email.sourceAccountId
+  const cacheKey = owningClient.getAccountId() === email.sourceAccountId
     ? email.sourceClientAccountId
     : email.sourceAccountId;
-  await useEmailStore.getState().fetchAccountMailboxes(context.client, cacheKey);
+  await useEmailStore.getState().fetchAccountMailboxes(owningClient, cacheKey);
   return resolveEmailActionContext(email, passedClient);
 }
 
@@ -1442,14 +1469,17 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
 
       // The email's current mailbox drives the junk auto-permanent-delete rule.
       // In unified view it comes from the email's own folders (matching the
-      // unified role), not the active account's selected mailbox.
+      // unified role); otherwise from the selected folder, resolved in the
+      // view's own id space.
       const currentMailbox = get().isUnifiedView
         ? (mailboxes.find(mb => emailInMailbox(email, mb) && mb.role === get().unifiedRole)
             ?? mailboxes.find(mb => emailInMailbox(email, mb)))
-        : mailboxes.find(mb => mb.id === get().selectedMailbox);
+        : getViewMailboxes().find(mb => mb.id === get().selectedMailbox);
 
-      // If in junk folder and setting is enabled, permanently delete
-      const isInJunk = currentMailbox?.role === 'junk';
+      // Escalating to a permanent delete is irreversible, so require the email
+      // to really sit in its own account's junk, not just that the open folder
+      // looks like one.
+      const isInJunk = currentMailbox?.role === 'junk' && emailIsInRole(email, mailboxes, 'junk');
       if (isInJunk && permanentlyDeleteJunk) {
         forceDelete = true;
       }

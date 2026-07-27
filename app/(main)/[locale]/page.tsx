@@ -17,7 +17,7 @@ import { useAccountStore } from "@/stores/account-store";
 import { usePolicyStore } from "@/stores/policy-store";
 import type { UnifiedAccountClient } from "@/lib/unified-mailbox";
 import { KeyboardShortcutsModal } from "@/components/keyboard-shortcuts-modal";
-import { useEmailStore, buildUnifiedAccountClients, ensureEmailActionContext } from "@/stores/email-store";
+import { useEmailStore, buildUnifiedAccountClients, ensureEmailActionContext, emailIsInRole, getViewMailboxes } from "@/stores/email-store";
 import { toast } from "@/stores/toast-store";
 import { useAuthStore, redirectToLogin } from "@/stores/auth-store";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -1550,13 +1550,18 @@ export default function Home() {
       await ensureEmailActionContext(emailToDelete, client);
 
     // Check if we're currently in the trash or junk folder. In unified view the
-    // "current folder" is the unified role within the email's account.
+    // "current folder" is the unified role within the email's account; the
+    // selected folder is an id of the VIEW's list, so it resolves there.
     const currentMailbox = isUnifiedView
       ? (actionMailboxes.find(m => m.role === unifiedRole && emailToDelete.mailboxIds?.[m.id])
           ?? actionMailboxes.find(m => m.role === unifiedRole))
-      : actionMailboxes.find(m => m.id === selectedMailbox);
-    const isInTrash = currentMailbox?.role === 'trash';
-    const isInJunk = currentMailbox?.role === 'junk';
+      : getViewMailboxes().find(m => m.id === selectedMailbox);
+    // Offering an irreversible delete demands more than the open folder
+    // looking like trash: the email itself has to be in its own account's.
+    const isInTrash =
+      currentMailbox?.role === 'trash' && emailIsInRole(emailToDelete, actionMailboxes, 'trash');
+    const isInJunk =
+      currentMailbox?.role === 'junk' && emailIsInRole(emailToDelete, actionMailboxes, 'junk');
     const permanentlyDeleteJunk = useSettingsStore.getState().permanentlyDeleteJunk;
 
     if (isInTrash || (isInJunk && permanentlyDeleteJunk)) {
