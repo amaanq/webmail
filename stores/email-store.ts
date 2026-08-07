@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { Email, Mailbox, StateChange, ScheduledEmail, SendEmailResult, isUnifiedMailboxId, isCrossViewId } from "@/lib/jmap/types";
+import { Email, Mailbox, StateChange, ScheduledEmail, SendEmailResult, isUnifiedMailboxId, isCrossViewId, UNIFIED_ROLE_BY_ID, CROSS_VIEW_BY_ID } from "@/lib/jmap/types";
 import type { UnifiedMailboxRole, CrossView } from "@/lib/jmap/types";
 import type { IJMAPClient } from "@/lib/jmap/client-interface";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -925,6 +925,11 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     threadEmailsCache: new Map(),
     threadEmailCounts: new Map(),
     isLoadingThread: null,
+    // stale unified flags make the push refresh rebuild the wrong view
+    isUnifiedView: false,
+    unifiedRole: null,
+    crossView: null,
+    unifiedErrors: new Map(),
   }),
   fetchAccountMailboxes: async (client, accountId) => {
     try {
@@ -2992,7 +2997,9 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     try {
       // Fetch emails for the current mailbox without clearing the list first
       // This provides a smoother update experience
-      const { isUnifiedView, unifiedRole, crossView } = get();
+      // key on the id, the isUnifiedView/crossView flags survive leaving the view
+      const unifiedRole = UNIFIED_ROLE_BY_ID[selectedMailbox];
+      const crossView = CROSS_VIEW_BY_ID[selectedMailbox];
 
       // Get emails per page from settings
       const emailsPerPage = useSettingsStore.getState().emailsPerPage;
@@ -3004,7 +3011,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
 
       let result;
       let refreshedInbox;
-      if ((isUnifiedView && unifiedRole) || crossView) {
+      if (unifiedRole || crossView) {
         // The selected id is virtual in aggregate views and means nothing to
         // any single server. Asking the active one for it came back empty and
         // the merge below then dropped the newest page of the list. Refresh

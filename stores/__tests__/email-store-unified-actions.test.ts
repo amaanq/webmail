@@ -353,3 +353,24 @@ describe('aggregate-view push refresh', () => {
     }
   });
 });
+
+// the per-account sidebar path left unified flags set, so a push refresh
+// rebuilt a real folder's list as the unified view
+describe('push refresh after leaving the unified view', () => {
+  it('refreshes the selected real folder, not the stale unified view', async () => {
+    const folderClient = {
+      getAccountId: () => 'g-jmap',
+      getEmails: vi.fn().mockResolvedValue({ emails: [], total: 0, hasMore: false }),
+      getAllMailboxes: vi.fn().mockResolvedValue([]),
+      getMailboxes: vi.fn().mockResolvedValue([]),
+    } as unknown as IJMAPClient;
+
+    useEmailStore.setState({ isUnifiedView: true, unifiedRole: 'inbox', selectedMailbox: UNIFIED_INBOX });
+    useEmailStore.getState().selectAccountMailbox('account-g', 'g-inbox');
+    expect(useEmailStore.getState().isUnifiedView).toBe(false);
+
+    await useEmailStore.getState().refreshCurrentMailbox(folderClient);
+
+    expect(folderClient.getEmails).toHaveBeenCalledWith('g-inbox', undefined, expect.anything(), 0, undefined, true);
+  });
+});
