@@ -2992,11 +2992,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
     try {
       // Fetch emails for the current mailbox without clearing the list first
       // This provides a smoother update experience
-      const mailboxes = resolveActionMailboxes();
-      const effectiveClient = resolveActionClient(client);
-      const mailbox = mailboxes.find(mb => mb.id === selectedMailbox);
-      const accountId = mailbox?.isShared ? mailbox.accountId : undefined;
-      const jmapMailboxId = mailbox?.originalId || selectedMailbox;
+      const { isUnifiedView, unifiedRole, crossView } = get();
 
       // Get emails per page from settings
       const emailsPerPage = useSettingsStore.getState().emailsPerPage;
@@ -3007,11 +3003,41 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       const hasFilters = !isFilterEmpty(searchFilters);
 
       let result;
-      if (hasFilters || searchQuery) {
-        const filter = buildJMAPFilter(searchQuery, searchFilters, jmapMailboxId);
-        result = await effectiveClient.advancedSearchEmails(filter, accountId, emailsPerPage, 0);
+      let refreshedInbox;
+      if ((isUnifiedView && unifiedRole) || crossView) {
+        // The selected id is virtual in aggregate views and means nothing to
+        // any single server. Asking the active one for it came back empty and
+        // the merge below then dropped the newest page of the list. Refresh
+        // through the same fan-out that built the view, which also re-stamps
+        // each row's source account so later actions keep routing correctly.
+        const includeGroup = useSettingsStore.getState().includeGroupInUnified;
+        const built = await buildUnifiedAccountClients({ includeGroup });
+        result = crossView
+          ? hasFilters
+            ? await advancedSearchCrossViewEmails(built, crossView, buildJMAPFilter(searchQuery, searchFilters, undefined), emailsPerPage, 0)
+            : searchQuery
+              ? await searchCrossViewEmails(built, crossView, searchQuery, emailsPerPage, 0)
+              : await fetchCrossViewEmails(built, crossView, emailsPerPage, 0)
+          : hasFilters
+            ? await advancedSearchUnifiedEmails(built, unifiedRole!, (mailboxId) => buildJMAPFilter(searchQuery, searchFilters, mailboxId), emailsPerPage, 0)
+            : searchQuery
+              ? await searchUnifiedEmails(built, unifiedRole!, searchQuery, emailsPerPage, 0)
+              : await fetchUnifiedEmails(built, unifiedRole!, emailsPerPage, 0);
+        refreshedInbox = !crossView && unifiedRole === 'inbox';
       } else {
-        result = await effectiveClient.getEmails(jmapMailboxId, accountId, emailsPerPage, 0, undefined, true);
+        const mailboxes = resolveActionMailboxes();
+        const effectiveClient = resolveActionClient(client);
+        const mailbox = mailboxes.find(mb => mb.id === selectedMailbox);
+        const accountId = mailbox?.isShared ? mailbox.accountId : undefined;
+        const jmapMailboxId = mailbox?.originalId || selectedMailbox;
+
+        if (hasFilters || searchQuery) {
+          const filter = buildJMAPFilter(searchQuery, searchFilters, jmapMailboxId);
+          result = await effectiveClient.advancedSearchEmails(filter, accountId, emailsPerPage, 0);
+        } else {
+          result = await effectiveClient.getEmails(jmapMailboxId, accountId, emailsPerPage, 0, undefined, true);
+        }
+        refreshedInbox = mailbox?.role === 'inbox';
       }
 
       const currentEmails = get().emails;
@@ -3026,7 +3052,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       const newFirst = result.emails.find(e => !e.keywords?.['$pinned']) ?? result.emails[0];
       if (
         newFirst &&
-        mailbox?.role === 'inbox' &&
+        refreshedInbox &&
         !currentEmails.some(e => e.id === newFirst.id)
       ) {
         get().handleNewEmailNotification(newFirst);

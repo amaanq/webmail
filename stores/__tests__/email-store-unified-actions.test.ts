@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useEmailStore } from '../email-store';
 import { useAuthStore } from '../auth-store';
+import { useAccountStore } from '../account-store';
+import { UNIFIED_INBOX } from '@/lib/jmap/types';
 import type { Email, Mailbox } from '@/lib/jmap/types';
 import type { IJMAPClient } from '@/lib/jmap/client-interface';
 import type { UnifiedAccountClient } from '@/lib/unified-mailbox';
@@ -306,5 +308,48 @@ describe('unified-view single-email action routing (#281)', () => {
 
     expect(accountBClient.markAsRead).toHaveBeenCalledWith('email-b', true, 'account-b');
     expect(activeClient.markAsRead).not.toHaveBeenCalled();
+  });
+});
+
+// The push-triggered refresh once asked the active server for the virtual view
+// id, which matches nothing, and the empty page wiped the newest rows.
+describe('aggregate-view push refresh', () => {
+  it('refreshes through the fan-out instead of the virtual id', async () => {
+    const mkFanoutClient = (prefix: string) => ({
+      getAccountId: () => `${prefix}-jmap`,
+      getMailboxes: vi.fn().mockResolvedValue([
+        { id: `${prefix}-inbox`, name: 'Inbox', role: 'inbox', isShared: false },
+      ]),
+      getAllMailboxes: vi.fn().mockResolvedValue([
+        { id: `${prefix}-inbox`, name: 'Inbox', role: 'inbox', isShared: false },
+      ]),
+      getEmails: vi.fn().mockResolvedValue({ emails: [], total: 0, hasMore: false }),
+    }) as unknown as IJMAPClient;
+
+    const a = mkFanoutClient('a');
+    const b = mkFanoutClient('b');
+    const clients = new Map([['account-a', a], ['account-b', b]]);
+    useAccountStore.setState({
+      accounts: [
+        { id: 'account-a', isConnected: true, label: 'A', email: 'a@example.com' },
+        { id: 'account-b', isConnected: true, label: 'B', email: 'b@example.com' },
+      ],
+    } as never);
+    useAuthStore.setState({ getAllConnectedClients: () => clients } as never);
+    useEmailStore.setState({
+      isUnifiedView: true,
+      unifiedRole: 'inbox',
+      selectedMailbox: UNIFIED_INBOX,
+      emails: [],
+    });
+
+    await useEmailStore.getState().refreshCurrentMailbox(a);
+
+    for (const c of [a, b]) {
+      expect(c.getEmails).toHaveBeenCalled();
+      for (const call of (c.getEmails as ReturnType<typeof vi.fn>).mock.calls) {
+        expect(call[0]).not.toBe(UNIFIED_INBOX);
+      }
+    }
   });
 });
