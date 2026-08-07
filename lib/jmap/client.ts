@@ -667,7 +667,7 @@ export class JMAPClient implements IJMAPClient {
     return this.serverUrl;
   }
 
-  private async authenticatedFetch(url: string, init?: Parameters<typeof fetch>[1]): Promise<Response> {
+  private async authenticatedFetch(url: string, init?: Parameters<typeof fetch>[1], timeoutMs?: number): Promise<Response> {
     // Short-circuit: if rate-limited, reject immediately without sending a request
     if (this.isRateLimited()) {
       const remaining = this.rateLimitedUntil - Date.now();
@@ -676,15 +676,23 @@ export class JMAPClient implements IJMAPClient {
     }
 
     const headers = { ...init?.headers as Record<string, string>, 'Authorization': this.authHeader };
+    // A fresh timeout signal per attempt. Without one, a request queued on a
+    // dead pooled connection hangs until the kernel gives up (minutes), no
+    // failure ever surfaces, and the reconnect machinery never engages.
+    const doFetch = (attemptHeaders: Record<string, string>) => fetch(url, {
+      ...init,
+      headers: attemptHeaders,
+      signal: init?.signal ?? (timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined),
+    });
     let response: Response;
 
     try {
-      response = await fetch(url, { ...init, headers });
+      response = await doFetch(headers);
     } catch (error) {
       // Network error: retry once after brief delay (transient proxy/connection issues)
       if (this.reconnecting) throw error;
       await new Promise(r => setTimeout(r, 1000));
-      response = await fetch(url, { ...init, headers });
+      response = await doFetch(headers);
     }
 
     // Handle 429 rate limiting - stop immediately, do not retry
@@ -700,7 +708,7 @@ export class JMAPClient implements IJMAPClient {
         if (newToken) {
           this.updateAccessToken(newToken);
           const retryHeaders = { ...init?.headers as Record<string, string>, 'Authorization': this.authHeader };
-          response = await fetch(url, { ...init, headers: retryHeaders });
+          response = await doFetch(retryHeaders);
         }
       } else if (this.authMode === 'basic' && !this.reconnecting && url !== `${this.serverUrl}/.well-known/jmap`) {
         // JMAP session may have expired - re-establish and retry once
@@ -709,7 +717,7 @@ export class JMAPClient implements IJMAPClient {
           await this.refreshSession();
           this.connectionChangeCallback?.(true);
           const retryHeaders = { ...init?.headers as Record<string, string>, 'Authorization': this.authHeader };
-          response = await fetch(url, { ...init, headers: retryHeaders });
+          response = await doFetch(retryHeaders);
         } catch {
           // Session refresh failed - if TOTP was used, try re-auth with fresh TOTP
           if (this.onTotpRequired && this.basePassword) {
@@ -720,7 +728,7 @@ export class JMAPClient implements IJMAPClient {
                 await this.refreshSession();
                 this.connectionChangeCallback?.(true);
                 const retryHeaders = { ...init?.headers as Record<string, string>, 'Authorization': this.authHeader };
-                response = await fetch(url, { ...init, headers: retryHeaders });
+                response = await doFetch(retryHeaders);
               }
             } catch {
               // TOTP re-auth also failed - return original 401
@@ -969,7 +977,7 @@ export class JMAPClient implements IJMAPClient {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(requestBody),
-    });
+    }, JMAPClient.API_REQUEST_TIMEOUT);
 
     const responseText = await response.text();
 
@@ -5893,6 +5901,8 @@ export class JMAPClient implements IJMAPClient {
   private pollingStates: { [key: string]: string } = {};
   private sseAbortController: AbortController | null = null;
   private sseReconnectTimeout: NodeJS.Timeout | null = null;
+  private sseReconnectAttempts = 0;
+  private stateCheckInFlight = false;
   private ssePingTimer: NodeJS.Timeout | null = null;
   private lastSSEActivity: number = 0;
   private visibilityHandler: (() => void) | null = null;
@@ -5906,6 +5916,9 @@ export class JMAPClient implements IJMAPClient {
     'SieveScript/get': 'SieveScript',
   };
 
+  // Generous next to normal sub-second calls, but bounded, so a request stuck
+  // on a dead connection fails while the retry/backoff paths still matter.
+  private static readonly API_REQUEST_TIMEOUT = 30_000;
   private static readonly POLLING_INTERVAL = 3_000;
   // Shared/secondary accounts get no SSE push (Stalwart pushes the primary
   // account only), so poll them on a slow cadence alongside SSE to keep their
@@ -6003,6 +6016,7 @@ export class JMAPClient implements IJMAPClient {
         if (done) break;
 
         this.lastSSEActivity = Date.now();
+        this.sseReconnectAttempts = 0;
 
         buffer += decoder.decode(value, { stream: true });
         const parts = buffer.split('\n\n');
@@ -6055,9 +6069,15 @@ export class JMAPClient implements IJMAPClient {
       this.fallbackToPolling();
       return;
     }
+    // 3s, 6s, 12s, ... capped at 60s, reset when a stream delivers data.
+    const backoff = Math.min(
+      JMAPClient.SSE_RECONNECT_DELAY * 2 ** this.sseReconnectAttempts,
+      60_000,
+    );
+    this.sseReconnectAttempts++;
     const delay = this.isRateLimited()
-      ? Math.max(this.rateLimitedUntil - Date.now(), JMAPClient.SSE_RECONNECT_DELAY)
-      : JMAPClient.SSE_RECONNECT_DELAY;
+      ? Math.max(this.rateLimitedUntil - Date.now(), backoff)
+      : backoff;
     this.sseReconnectTimeout = setTimeout(() => {
       if (this.isRateLimited()) {
         this.scheduleSSEReconnect();
@@ -6169,13 +6189,17 @@ export class JMAPClient implements IJMAPClient {
     if (this.isRateLimited()) {
       return;
     }
+    // The interval keeps firing while a previous check is stuck on a dead
+    // connection, and the stacked requests are what melts the tab.
+    if (this.stateCheckInFlight) return;
+    this.stateCheckInFlight = true;
     try {
       const { using, methodCalls } = this.buildStatePollingRequest();
       const response = await this.authenticatedFetch(this.apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ using, methodCalls }),
-      });
+      }, JMAPClient.API_REQUEST_TIMEOUT);
 
       if (response.ok) {
         const data = await response.json();
@@ -6201,6 +6225,8 @@ export class JMAPClient implements IJMAPClient {
       }
     } catch {
       // Silently fail - polling will retry
+    } finally {
+      this.stateCheckInFlight = false;
     }
   }
 
