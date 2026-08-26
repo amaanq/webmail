@@ -83,6 +83,21 @@ class TransientAuthError extends Error {
   }
 }
 
+// Our own auth endpoint positively rejected the stored session (4xx). This is
+// the only proof strong enough to delete an account and its cookies, anything
+// unrecognized must be treated as an outage and kept.
+class DefinitiveAuthError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(`${message}: ${status}`);
+  }
+}
+
+export function restoreErrorEvicts(error: unknown): boolean {
+  return error instanceof DefinitiveAuthError;
+}
+
+export const __authErrorsForTest = { TransientAuthError, DefinitiveAuthError };
+
 // True when a restore/refresh attempt failed because the server could not be
 // reached (network error) or answered 5xx (restart, maintenance, proxy
 // hiccup). Such failures must keep the account and its cookies - "stay signed
@@ -1362,7 +1377,7 @@ export const useAuthStore = create<AuthState>()(
         // over the network (nothing worth keeping on screen while we wait).
         let targetClient = clients.get(accountId);
         const wasConnected = !!targetClient;
-        let targetRestoreRateLimited = false;
+        let targetRestoreRejected = false;
 
         if (!targetClient) {
           // Null out the client immediately so the page doesn't fire data-loading
@@ -1395,6 +1410,10 @@ export const useAuthStore = create<AuthState>()(
                   targetClient.getAuthHeader(),
                   targetAccount.cookieSlot,
                 );
+              } else if (res.status >= 500 || res.status === 429) {
+                throw new TransientAuthError('Token refresh failed', res.status);
+              } else {
+                throw new DefinitiveAuthError('Token refresh failed', res.status);
               }
             } else if (targetAccount.authMode === 'basic' && targetAccount.rememberMe) {
               const res = await apiFetch(`/api/auth/session?slot=${targetAccount.cookieSlot}`, { method: 'PUT' });
@@ -1405,18 +1424,23 @@ export const useAuthStore = create<AuthState>()(
                 await targetClient.connect();
                 clients.set(accountId, targetClient);
                 await syncStalwartAuthContext(serverUrl, username, targetClient.getAuthHeader(), targetAccount.cookieSlot);
+              } else if (res.status >= 500 || res.status === 429) {
+                throw new TransientAuthError('Session restore failed', res.status);
+              } else {
+                throw new DefinitiveAuthError('Session cookie missing', res.status);
               }
             }
           } catch (err) {
             debug.error(`Failed to restore client for ${accountId}:`, err);
-            if (isRateLimitError(err)) {
-              targetRestoreRateLimited = true;
-            }
+            targetRestoreRejected = restoreErrorEvicts(err);
           }
         }
 
         if (!targetClient) {
-          if (targetRestoreRateLimited) {
+          // Keep the account on anything but a positive rejection of the
+          // stored session. Outages during a switch used to delete the
+          // target account and its cookies.
+          if (!targetRestoreRejected) {
             if (state.activeAccountId && state.activeAccountId !== accountId) {
               const prevClient = clients.get(state.activeAccountId);
               const prevAccount = accountStore.getAccountById(state.activeAccountId);
@@ -1652,10 +1676,10 @@ export const useAuthStore = create<AuthState>()(
                   scheduleRefresh(expires_in, get().refreshAccessToken, account.id);
                   await syncStalwartAuthContext(account.serverUrl, account.username, client.getAuthHeader(), account.cookieSlot);
                   accountStore.updateAccount(account.id, { isConnected: true, hasError: false });
-                } else if (res.status >= 500) {
+                } else if (res.status >= 500 || res.status === 429) {
                   throw new TransientAuthError('Token refresh failed', res.status);
                 } else {
-                  throw new Error(`Token refresh failed: ${res.status}`);
+                  throw new DefinitiveAuthError('Token refresh failed', res.status);
                 }
               } else {
                 const res = await apiFetch(`/api/auth/session?slot=${account.cookieSlot}`, { method: 'PUT' });
@@ -1667,10 +1691,10 @@ export const useAuthStore = create<AuthState>()(
                   clients.set(account.id, client);
                   await syncStalwartAuthContext(serverUrl, username, client.getAuthHeader(), account.cookieSlot);
                   accountStore.updateAccount(account.id, { isConnected: true, hasError: false });
-                } else if (res.status >= 500) {
+                } else if (res.status >= 500 || res.status === 429) {
                   throw new TransientAuthError('Session restore failed', res.status);
                 } else {
-                  throw new Error(`Session cookie missing: ${res.status}`);
+                  throw new DefinitiveAuthError('Session cookie missing', res.status);
                 }
               }
             } catch (err) {
@@ -1683,11 +1707,11 @@ export const useAuthStore = create<AuthState>()(
                 });
                 continue;
               }
-              // Outage or offline - keep the account (and its cookies) so the
-              // session resumes once the server is reachable again. Same
-              // treatment as the rate-limit case above; only a definitive
-              // rejection below evicts.
-              if (isTransientAuthError(err)) {
+              // Evict only on our auth endpoint positively rejecting the
+              // stored session. Everything else is an outage of some shape,
+              // and deleting accounts plus their cookies on outages is how
+              // five logins vanished during one Stalwart 502 window.
+              if (!restoreErrorEvicts(err)) {
                 accountStore.updateAccount(account.id, {
                   isConnected: false,
                   hasError: true,
@@ -1695,8 +1719,6 @@ export const useAuthStore = create<AuthState>()(
                 });
                 continue;
               }
-              // Remove unrestorable accounts so the user is prompted to log in
-              // again rather than seeing a stale error entry forever.
               evictAccount(account.id);
               accountStore.removeAccount(account.id);
               apiFetch(`/api/auth/session?slot=${account.cookieSlot}`, { method: 'DELETE' }).catch(() => {});
