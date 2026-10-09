@@ -1947,6 +1947,28 @@ export function resolveEmailActionContext(
 }
 
 /**
+ * `resolveEmailActionContext` for actions that resolve a destination folder
+ * (trash, junk, inbox, a move target): fetches the owning account's folders
+ * when none are cached, instead of finding no destination at all.
+ */
+export async function ensureEmailActionContext(
+  email: { sourceClientAccountId?: string; sourceAccountId?: string },
+  passedClient: IJMAPClient,
+): Promise<{ client: IJMAPClient; mailboxes: Mailbox[]; accountId: string | undefined }> {
+  const context = resolveEmailActionContext(email, passedClient);
+  const { sourceClientAccountId, sourceAccountId } = email;
+  if (!sourceClientAccountId || !sourceAccountId || context.mailboxes.length > 0) return context;
+
+  // Fetching through the fallback client would cache another account's
+  // folders under the owner's key.
+  const owningClient = useAuthStore.getState().getClientForAccount(sourceClientAccountId);
+  if (!owningClient) return context;
+
+  await useEmailStore.getState().fetchAccountMailboxes(owningClient, sourceAccountId, sourceClientAccountId);
+  return resolveEmailActionContext(email, passedClient);
+}
+
+/**
  * Resolution for a keyword write, by email id.
  *
  * Same routing as `resolveEmailActionContext`, but only when the email is
@@ -3103,7 +3125,7 @@ async function runBatchSpamAction(
       failures.push(new Error('Not connected'));
       continue;
     }
-    const { client: actionClient, mailboxes, accountId } = resolveEmailActionContext(email, client);
+    const { client: actionClient, mailboxes, accountId } = await ensureEmailActionContext(email, client);
     const destination = findRoleMailbox(mailboxes, role, accountId);
     if (!destination && role === 'inbox') {
       failures.push(new Error('Inbox not found'));
@@ -4661,7 +4683,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       const isUnread = !email.keywords?.$seen;
       // In unified view route to the email's own account (client + that
       // account's mailbox list); otherwise the active/viewing context. (#281)
-      const { client: effectiveClient, mailboxes, accountId } = resolveEmailActionContext(email, client);
+      const { client: effectiveClient, mailboxes, accountId } = await ensureEmailActionContext(email, client);
 
       // Get delete action preference from settings
       const deleteAction = useSettingsStore.getState().deleteAction;
@@ -4981,9 +5003,10 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
       // In unified view route to the email's own account (client + that
       // account's mailbox list, where the destination id lives); otherwise the
       // active/viewing context. (#281)
-      const { client: actionClient, mailboxes, accountId } = resolveEmailActionContext(email, client);
+      const { client: actionClient, mailboxes, accountId } = await ensureEmailActionContext(email, client);
 
       const destMailbox = mailboxes.find(mb => mb.id === destinationMailboxId);
+      if (!destMailbox && email.sourceClientAccountId && email.sourceAccountId) throw new Error("Destination folder is not in the email's account");
       const jmapDestId = destMailbox?.originalId || destinationMailboxId;
 
       const move = { emailIds: [emailId], fromMailboxId: moveSourceMailboxId([email], mailboxes), toMailboxId: destinationMailboxId };
@@ -5411,8 +5434,9 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
 
       // In unified view route to the email's own account (client + that
       // account's mailbox list); otherwise the active/viewing context. (#281)
-      const { client: effectiveClient, mailboxes, accountId } = resolveEmailActionContext(email, client);
+      const { client: effectiveClient, mailboxes, accountId } = await ensureEmailActionContext(email, client);
       const destMailbox = mailboxes.find(mb => mb.id === destinationMailboxId);
+      if (!destMailbox && email.sourceClientAccountId && email.sourceAccountId) throw new Error("Destination folder is not in the email's account");
       const jmapDestId = destMailbox?.originalId || destinationMailboxId;
 
       const thread = await effectiveClient.getThread(email.threadId, accountId);
@@ -6780,7 +6804,7 @@ export const useEmailStore = create<EmailStore>((set, get) => ({
 
     // In unified view route to the email's own account (client + that account's
     // mailbox list); otherwise the active/viewing context. (#281)
-    const { client: actionClient, mailboxes, accountId } = resolveEmailActionContext(email, client);
+    const { client: actionClient, mailboxes, accountId } = await ensureEmailActionContext(email, client);
 
     // The email's current mailbox is what undo restores it to. In unified view
     // derive it from the email's own folders (preferring the unified role),

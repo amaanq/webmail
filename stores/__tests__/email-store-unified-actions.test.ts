@@ -116,8 +116,8 @@ describe('unified-view single-email action routing (#281)', () => {
       accountMailboxes: {
         'account-a': [makeMailbox({ id: 'a-inbox', role: 'inbox' })],
         'account-b': [
-          makeMailbox({ id: 'b-inbox', role: 'inbox' }),
-          makeMailbox({ id: 'b-archive', name: 'Archive', role: 'archive' }),
+          makeMailbox({ id: 'b-inbox', role: 'inbox', accountId: 'account-b' }),
+          makeMailbox({ id: 'b-archive', name: 'Archive', role: 'archive', accountId: 'account-b' }),
         ],
         // Shared owner reached through account-a's client.
         'owner-x': [

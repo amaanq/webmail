@@ -65,7 +65,7 @@ import { connectedAccountsGrew } from "@/lib/unified-mailbox";
 import { messagePriorityFromHeaders, type MessagePriority } from "@/lib/message-priority";
 import { LazyKeyboardShortcutsModal } from "@/components/lazy-keyboard-shortcuts-modal";
 import { lazyComponent } from "@/lib/lazy-component";
-import { useEmailStore, annotateScheduledEmails, annotateScheduledEmail, pendingInitialData, buildUnifiedAccountClients, invalidateUnifiedMailboxes, captureViewToken, ArchiveMailboxNotFoundError, ensureArchiveMailbox, resolveSelectedEmails, resolveUnstampedEmailAccountId, resolveEmailBlobContext, resolveEmailActionContext, emailWriteSource, emailLinkSource, type EmailBlobContext, type EmailWriteSource, emptyFolderMovesToTrash, bulkDeleteIsPermanent, shouldConfirmBulkDelete, isAggregateListView, removalFolder, canRemoveFromFolder, restoreBatchesFor, restoreBatchesForSelection, TrashMailboxNotFoundError, type EmailRestoreBatch , type CrossAccountMoveReceipt } from "@/stores/email-store";
+import { useEmailStore, annotateScheduledEmails, annotateScheduledEmail, pendingInitialData, buildUnifiedAccountClients, invalidateUnifiedMailboxes, captureViewToken, ArchiveMailboxNotFoundError, ensureArchiveMailbox, resolveSelectedEmails, resolveUnstampedEmailAccountId, resolveEmailBlobContext, resolveEmailActionContext, ensureEmailActionContext, emailWriteSource, emailLinkSource, type EmailBlobContext, type EmailWriteSource, emptyFolderMovesToTrash, bulkDeleteIsPermanent, shouldConfirmBulkDelete, isAggregateListView, removalFolder, canRemoveFromFolder, restoreBatchesFor, restoreBatchesForSelection, TrashMailboxNotFoundError, type EmailRestoreBatch , type CrossAccountMoveReceipt } from "@/stores/email-store";
 import { findDraftIdentityIdForLogin, listRowSource, resolveDraftSource, type DraftSource } from "@/lib/draft-source";
 import { useRemoveFromFolder } from "@/hooks/use-remove-from-folder";
 import { groupSearchScopeFolders, SEARCH_SCOPE_ALL_FOLDERS } from "@/lib/search-scope-folders";
@@ -3887,9 +3887,9 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
     // login and account, as the delete itself is routed: its source in a list
     // that mixes accounts, else the folder being browsed. Never the list cached
     // under the bare account id, which can be another server's account. (#281)
-    let action: ReturnType<typeof resolveEmailActionContext>;
+    let action: Awaited<ReturnType<typeof ensureEmailActionContext>>;
     try {
-      action = resolveEmailActionContext(emailToDelete, client);
+      action = await ensureEmailActionContext(emailToDelete, client);
     } catch (error) {
       toast.error(t('notifications.error_deleting'), error instanceof Error ? error.message : undefined);
       return;
