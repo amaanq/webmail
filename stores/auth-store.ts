@@ -251,6 +251,22 @@ class TransientAuthError extends Error {
   }
 }
 
+// Our own auth endpoint rejected the stored session, the one failure that may
+// evict an account and delete its cookies on restore. A Stalwart outage shows
+// up as a stalled connect, a Stalwart 401 or 502, or a rate limit, and must not
+// sign out every login at once.
+class DefinitiveAuthError extends Error {
+  constructor(message: string, readonly status: number, readonly forced: ForcedSignOutKind | null) {
+    super(`${message}: ${status}`);
+  }
+}
+
+async function restoreResponseError(message: string, res: Response): Promise<Error> {
+  return res.status >= 500 || res.status === 408 || res.status === 429
+    ? new TransientAuthError(message, res.status)
+    : new DefinitiveAuthError(message, res.status, await forcedSignOutOf(res));
+}
+
 // True when a restore/refresh attempt failed because the server could not be
 // reached (network error) or answered 5xx (restart, maintenance, proxy
 // hiccup). Such failures must keep the account and its cookies - "stay signed
@@ -1338,30 +1354,6 @@ function nextRefreshRetrySeconds(accountId?: string): number {
 
 function resetRefreshBackoff(accountId?: string): void {
   refreshFailureCounts.delete(accountId ?? '__global__');
-  permanentRefreshFailureCounts.delete(accountId ?? '__global__');
-}
-
-// /api/auth/token answers 503 for an upstream outage (retry forever - the IdP
-// may come back) but 500/502 for a Bulwark-side failure (misconfiguration,
-// broken token response). The latter does not heal by waiting, so after this
-// many consecutive answers the account is evicted and the user asked to sign
-// in again instead of retrying silently forever. (#972)
-const MAX_PERMANENT_REFRESH_FAILURES = 5;
-const permanentRefreshFailureCounts = new Map<string, number>();
-
-function isPermanentRefreshFailure(status: number): boolean {
-  return status === 500 || status === 502;
-}
-
-/** Records a 500/502 refresh answer; true once the consecutive cap is reached. */
-function recordPermanentRefreshFailure(status: number, accountId?: string): boolean {
-  if (!isPermanentRefreshFailure(status)) return false;
-  const key = accountId ?? '__global__';
-  const failures = (permanentRefreshFailureCounts.get(key) ?? 0) + 1;
-  permanentRefreshFailureCounts.set(key, failures);
-  if (failures < MAX_PERMANENT_REFRESH_FAILURES) return false;
-  permanentRefreshFailureCounts.delete(key);
-  return true;
 }
 
 /**
@@ -1379,12 +1371,6 @@ async function forcedSignOutOf(res: Response): Promise<ForcedSignOutKind | null>
   } catch {
     return null;
   }
-}
-
-function notifySignInAgain(): void {
-  void import('@/stores/toast-store').then(({ toast }) => {
-    toast.error('Your session could not be renewed', 'Sign in again to continue.');
-  }).catch(() => {});
 }
 
 // Only re-arm a failed refresh while someone is still signed in to that
@@ -2558,23 +2544,6 @@ export const useAuthStore = create<AuthState>()(
                 get().logout({ endProviderSession: false, keepLocalData: true });
                 return null;
               }
-              // A Bulwark-side failure (500/502) that keeps repeating will not
-              // heal by waiting: stop retrying and ask for a fresh sign-in. (#972)
-              if (recordPermanentRefreshFailure(res.status, accountId ?? undefined)) {
-                debug.error(`Token refresh failed permanently (${res.status}) ${MAX_PERMANENT_REFRESH_FAILURES} times - signing out`);
-                resetRefreshBackoff(accountId ?? undefined);
-                notifySignInAgain();
-                notifyParent('sso:session-expired');
-                markSessionExpired();
-                // removeAccount() on the active account would sign out as if the user asked to.
-                if (accountId && accountId !== get().activeAccountId) get().removeAccount(accountId, 'evicted');
-                else {
-                  await saveDraftsBeforeExpiry(slot);
-                  // An outage on our side says nothing against the mail on this device.
-                  get().logout({ endProviderSession: false, keepLocalData: true });
-                }
-                return null;
-              }
               if (shouldRetryRefresh(slot, accountId ?? undefined)) {
                 const retryIn = nextRefreshRetrySeconds(accountId ?? undefined);
                 debug.error(`Token refresh unavailable (${res.status}), retrying with backoff`);
@@ -2910,7 +2879,8 @@ export const useAuthStore = create<AuthState>()(
         // over the network (nothing worth keeping on screen while we wait).
         let targetClient = clients.get(accountId);
         const wasConnected = !!targetClient;
-        let targetRestoreRateLimited = false;
+        // Without remembered credentials there is nothing to restore from.
+        let targetRestoreRejected = targetAccount.authMode !== 'oauth' && !targetAccount.rememberMe;
         let targetForced: ForcedSignOutKind | null = null;
 
         if (!targetClient) {
@@ -2928,38 +2898,36 @@ export const useAuthStore = create<AuthState>()(
           try {
             if (targetAccount.authMode === 'oauth') {
               const res = await fetchSlotAccessToken(targetAccount.cookieSlot, { remember: targetAccount.rememberMe });
-              if (!res.ok && res.status === 401) targetForced = await forcedSignOutOf(res);
-              if (res.ok) {
-                const { access_token, expires_in } = await res.json();
-                targetClient = JMAPClient.withBearer(targetAccount.serverUrl, access_token, targetAccount.username, () => get().refreshAccessToken({ accountId }));
-                bindClientStatusHandlers(targetClient, set, get, accountId);
-                await targetClient.connect();
-                holdClient(accountId, targetClient);
-                scheduleRefresh(expires_in, () => get().refreshAccessToken({ accountId }), accountId);
-                await syncStalwartAuthContext(
-                  targetAccount.serverUrl,
-                  targetAccount.username,
-                  targetClient.getAuthHeader(),
-                  targetAccount.cookieSlot,
-                );
-              }
+              if (!res.ok) throw await restoreResponseError('Token refresh failed', res);
+              const { access_token, expires_in } = await res.json();
+              targetClient = JMAPClient.withBearer(targetAccount.serverUrl, access_token, targetAccount.username, () => get().refreshAccessToken({ accountId }));
+              bindClientStatusHandlers(targetClient, set, get, accountId);
+              await targetClient.connect();
+              holdClient(accountId, targetClient);
+              scheduleRefresh(expires_in, () => get().refreshAccessToken({ accountId }), accountId);
+              await syncStalwartAuthContext(
+                targetAccount.serverUrl,
+                targetAccount.username,
+                targetClient.getAuthHeader(),
+                targetAccount.cookieSlot,
+              );
             } else if (targetAccount.rememberMe) {
               const res = await fetchSlotSession(targetAccount.cookieSlot);
-              if (!res.ok && res.status === 401) targetForced = await forcedSignOutOf(res);
-              if (res.ok) {
-                const session: RememberedSession = await res.json();
-                targetClient = clientForSession(session);
-                bindClientStatusHandlers(targetClient, set, get, accountId);
-                await targetClient.connect();
-                holdClient(accountId, targetClient);
-                await syncStalwartAuthContext(session.serverUrl, session.username, targetClient.getAuthHeader(), targetAccount.cookieSlot);
-              }
+              if (!res.ok) throw await restoreResponseError('Session restore failed', res);
+              const session: RememberedSession = await res.json();
+              targetClient = clientForSession(session);
+              bindClientStatusHandlers(targetClient, set, get, accountId);
+              await targetClient.connect();
+              holdClient(accountId, targetClient);
+              await syncStalwartAuthContext(session.serverUrl, session.username, targetClient.getAuthHeader(), targetAccount.cookieSlot);
             }
           } catch (err) {
             debug.error(`Failed to restore client for ${accountId}:`, err);
-            if (isRateLimitError(err)) {
-              targetRestoreRateLimited = true;
+            if (err instanceof DefinitiveAuthError) {
+              targetRestoreRejected = true;
+              targetForced = err.forced;
             }
+            if (refusedAtConnect.has(accountId)) targetRestoreRejected = true;
           }
         }
 
@@ -2968,7 +2936,7 @@ export const useAuthStore = create<AuthState>()(
         if (superseded()) return;
 
         if (!targetClient) {
-          if (targetRestoreRateLimited) {
+          if (!targetRestoreRejected) {
             if (state.activeAccountId && state.activeAccountId !== accountId) {
               const prevClient = clients.get(state.activeAccountId);
               const prevAccount = accountStore.getAccountById(state.activeAccountId);
@@ -3265,13 +3233,8 @@ export const useAuthStore = create<AuthState>()(
                   await contextSync;
                   accountStore.updateAccount(account.id, { isConnected: true, hasError: false });
                   void syncAccountDisplayName(account.id, client);
-                } else if (res.status >= 500 && !recordPermanentRefreshFailure(res.status, account.id)) {
-                  throw new TransientAuthError('Token refresh failed', res.status);
                 } else {
-                  // Repeated 500/502 (see recordPermanentRefreshFailure) falls
-                  // through here and evicts the account like a rejection. (#972)
-                  if (res.status >= 500) notifySignInAgain();
-                  throw Object.assign(new Error(`Token refresh failed: ${res.status}`), { forced: await forcedSignOutOf(res) });
+                  throw await restoreResponseError('Token refresh failed', res);
                 }
               } else {
                 const res = await fetchSlotSession(account.cookieSlot);
@@ -3289,10 +3252,8 @@ export const useAuthStore = create<AuthState>()(
                     impersonated: session.impersonated === true,
                   });
                   void syncAccountDisplayName(account.id, client);
-                } else if (res.status >= 500 || res.status === 429) {
-                  throw new TransientAuthError('Session restore failed', res.status);
                 } else {
-                  throw Object.assign(new Error(`Session cookie missing: ${res.status}`), { forced: await forcedSignOutOf(res) });
+                  throw await restoreResponseError('Session restore failed', res);
                 }
               }
             } catch (err) {
@@ -3309,7 +3270,7 @@ export const useAuthStore = create<AuthState>()(
               // session resumes once the server is reachable again. Same
               // treatment as the rate-limit case above; only a definitive
               // rejection below evicts.
-              if (isTransientAuthError(err)) {
+              if (!(err instanceof DefinitiveAuthError) && !refusedAtConnect.has(account.id)) {
                 // Offline mode (#523): with this account's mail kept on the
                 // device, start from it. The client answers from the device
                 // only; a reload once the server is back signs in as usual.
@@ -3330,7 +3291,7 @@ export const useAuthStore = create<AuthState>()(
               // again rather than seeing a stale error entry forever. Its
               // refresh token goes with it: nothing would use or revoke it. Its
               // local data waits.
-              const { forced } = err as { forced?: ForcedSignOutKind | null };
+              const forced = err instanceof DefinitiveAuthError ? err.forced : null;
               if (forced) noteRefusedLogin(account.id, true, forced);
               else if (refusedAtConnect.has(account.id)) noteRefusedLogin(account.id, false);
               refusedAtConnect.delete(account.id);

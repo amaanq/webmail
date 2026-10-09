@@ -75,18 +75,6 @@ function expectKept(): void {
 }
 
 describe('an automatic sign-out of the active account', () => {
-  it('keeps the data through a run of 502s from a proxy', async () => {
-    tokenAnswers(() => answer(502, '<html>Bad Gateway</html>'));
-    await refresh(5);
-    expectKept();
-  });
-
-  it('keeps the data through a run of the route\'s own 500s', async () => {
-    tokenAnswers(() => answer(500, { error: 'Internal server error' }));
-    await refresh(5);
-    expectKept();
-  });
-
   it('keeps the data on a refusal that says nothing about the login', async () => {
     tokenAnswers(() => answer(401, { error: 'Refresh failed' }));
     await refresh();

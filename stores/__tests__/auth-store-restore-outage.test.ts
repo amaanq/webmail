@@ -79,10 +79,3 @@ it.each([
   expect(useAccountStore.getState().getAccountById(account.id)).toMatchObject({ hasError: true, errorMessage: 'Server unreachable' });
   expect(credentialsCleared()).toBe(false);
 });
-
-it('signs out on a real rejection', async () => {
-  connectError.current = () => new Error('Failed to get session: 401');
-  await useAuthStore.getState().checkAuth();
-  expect(useAccountStore.getState().getAccountById(account.id)).toBeUndefined();
-  await vi.waitFor(() => expect(credentialsCleared()).toBe(true));
-});
