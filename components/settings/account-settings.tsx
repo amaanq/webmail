@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useMemo } from 'react';
 import { useTranslations } from 'next-intl';
-import { Check, GripVertical, Plus, Star, AlertCircle, ChevronRight, ChevronUp, ChevronDown, X } from '@/components/icons';
+import { Check, GripVertical, Plus, Star, AlertCircle, ChevronRight, ChevronUp, ChevronDown, X, Pencil } from '@/components/icons';
 import { useAuthStore } from '@/stores/auth-store';
 import { useEmailStore } from '@/stores/email-store';
 import { useAccountStore, type AccountEntry } from '@/stores/account-store';
@@ -12,7 +12,7 @@ import { SettingsSection, SettingItem } from './settings-section';
 import { Avatar } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { useRouter } from '@/i18n/navigation';
-import { getMaxAccounts, accountRowText, accountSharesAddress } from '@/lib/account-utils';
+import { getMaxAccounts, accountRowText, accountSharesAddress, accountName } from '@/lib/account-utils';
 import { formatFileSize, cn } from '@/lib/utils';
 import { toUnicodeDomain, toUnicodeEmail } from '@/lib/idn';
 import { IS_LITE } from '@/lib/lite';
@@ -62,6 +62,7 @@ export function AccountSettings() {
   const accounts = useAccountStore((s) => s.accounts);
   const setDefaultAccount = useAccountStore((s) => s.setDefaultAccount);
   const reorderAccounts = useAccountStore((s) => s.reorderAccounts);
+  const updateAccount = useAccountStore((s) => s.updateAccount);
   const account = useAccountStore((s) => activeAccountId ? s.getAccountById(activeAccountId) : undefined);
 
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -243,6 +244,7 @@ export function AccountSettings() {
                 onSwitch={() => handleSwitch(a.id)}
                 onSetDefault={() => setDefaultAccount(a.id)}
                 onRemove={() => void handleRemove(a)}
+                onRename={(label) => updateAccount(a.id, { label: label || a.email || a.username })}
                 labels={{
                   active: t('accounts.active'),
                   default: t('accounts.default_badge'),
@@ -252,6 +254,9 @@ export function AccountSettings() {
                   moveDown: t('accounts.move_down'),
                   dragHandle: t('accounts.drag_handle'),
                   remove: tSidebar('remove_account'),
+                  rename: tCommon('edit'),
+                  save: tCommon('save'),
+                  cancel: tCommon('cancel'),
                 }}
               />
             ))}
@@ -339,6 +344,7 @@ interface AccountRowProps {
   onSwitch: () => void;
   onSetDefault: () => void;
   onRemove: () => void;
+  onRename: (label: string) => void;
   labels: {
     active: string;
     default: string;
@@ -348,6 +354,9 @@ interface AccountRowProps {
     moveDown: string;
     dragHandle: string;
     remove: string;
+    rename: string;
+    save: string;
+    cancel: string;
   };
 }
 
@@ -370,11 +379,15 @@ function AccountRow({
   onSwitch,
   onSetDefault,
   onRemove,
+  onRename,
   labels,
 }: AccountRowProps) {
+  const [draftLabel, setDraftLabel] = useState<string | null>(null);
+  const isEditing = draftLabel !== null;
+
   return (
     <div
-      draggable={canReorder}
+      draggable={canReorder && !isEditing}
       onDragStart={(e) => onDragStart(e, index)}
       onDragOver={(e) => onDragOver(e, index)}
       onDrop={(e) => onDrop(e, index)}
@@ -399,7 +412,7 @@ function AccountRow({
 
       <div className="relative flex-shrink-0">
         <Avatar
-          name={account.displayName || account.label}
+          name={accountName(account)}
           email={account.email || account.username}
           size="sm"
           className="w-9 h-9 text-sm"
@@ -413,85 +426,145 @@ function AccountRow({
         )}
       </div>
 
-      <button
-        type="button"
-        onClick={onSwitch}
-        disabled={isActive}
-        className={cn(
-          'min-w-0 flex-1 text-start',
-          !isActive && 'cursor-pointer'
-        )}
-        title={isActive ? labels.active : labels.switchTo}
-      >
-        <div className="flex items-center gap-1.5">
-          <span className="text-sm font-medium wrap-anywhere" title={toUnicodeEmail(text.title)}>
-            {toUnicodeEmail(text.title)}
-          </span>
-          {account.isDefault && (
-            <Star className="w-3 h-3 text-amber-500 flex-shrink-0 fill-amber-500" aria-label={labels.default} />
-          )}
-        </div>
-        {text.subtitle && (
-          <p dir="ltr" className="text-xs text-muted-foreground wrap-anywhere rtl:text-right">
-            {toUnicodeEmail(text.subtitle)}
-          </p>
-        )}
-        {showServer && (
-          <div className="flex items-center gap-1 mt-0.5" data-testid="account-server">
-            {account.hasError && <AlertCircle className="w-3 h-3 text-destructive" />}
-            <span className="text-xs text-muted-foreground truncate">
-              {hostnameOf(account.serverUrl)}
-            </span>
+      {isEditing ? (
+        <form
+          className="min-w-0 flex-1 flex items-center gap-1.5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onRename(draftLabel.trim());
+            setDraftLabel(null);
+          }}
+        >
+          <div className="min-w-0 flex-1">
+            <input
+              autoFocus
+              value={draftLabel}
+              placeholder={toUnicodeEmail(account.displayName || account.email || account.username)}
+              maxLength={80}
+              onChange={(event) => setDraftLabel(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setDraftLabel(null);
+                }
+              }}
+              aria-label={labels.rename}
+              className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm font-medium outline-none focus:ring-2 focus:ring-ring"
+            />
+            <p className="mt-0.5 text-xs text-muted-foreground truncate">
+              {toUnicodeEmail(account.email || account.username)}
+            </p>
           </div>
-        )}
-      </button>
+          <button
+            type="submit"
+            className="p-1.5 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            title={labels.save}
+            aria-label={labels.save}
+          >
+            <Check className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setDraftLabel(null)}
+            className="p-1.5 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            title={labels.cancel}
+            aria-label={labels.cancel}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </form>
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={onSwitch}
+            disabled={isActive}
+            className={cn(
+              'min-w-0 flex-1 text-start',
+              !isActive && 'cursor-pointer'
+            )}
+            title={isActive ? labels.active : labels.switchTo}
+          >
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm font-medium wrap-anywhere" title={toUnicodeEmail(text.title)}>
+                {toUnicodeEmail(text.title)}
+              </span>
+              {account.isDefault && (
+                <Star className="w-3 h-3 text-amber-500 flex-shrink-0 fill-amber-500" aria-label={labels.default} />
+              )}
+            </div>
+            {text.subtitle && (
+              <p dir="ltr" className="text-xs text-muted-foreground wrap-anywhere rtl:text-right">
+                {toUnicodeEmail(text.subtitle)}
+              </p>
+            )}
+            {showServer && (
+              <div className="flex items-center gap-1 mt-0.5" data-testid="account-server">
+                {account.hasError && <AlertCircle className="w-3 h-3 text-destructive" />}
+                <span className="text-xs text-muted-foreground truncate">
+                  {hostnameOf(account.serverUrl)}
+                </span>
+              </div>
+            )}
+          </button>
 
-      <div className="flex items-center gap-0.5 flex-shrink-0">
-        {!account.isDefault && (
-          <button
-            type="button"
-            onClick={onSetDefault}
-            className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-amber-500 transition-colors"
-            title={labels.setDefault}
-            aria-label={labels.setDefault}
-          >
-            <Star className="w-3.5 h-3.5" />
-          </button>
-        )}
-        {canReorder && (<>
-        <button
-          type="button"
-          onClick={onMoveUp}
-          disabled={isFirst}
-          className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed"
-          title={labels.moveUp}
-          aria-label={labels.moveUp}
-        >
-          <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          onClick={onMoveDown}
-          disabled={isLast}
-          className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed"
-          title={labels.moveDown}
-          aria-label={labels.moveDown}
-        >
-          <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
-        </button>
-        </>)}
-        {!isActive && (
-          <button
-            type="button"
-            onClick={onRemove}
-            className="p-1.5 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
-            title={labels.remove}
-            aria-label={labels.remove}
-          >
-            <X className="w-3.5 h-3.5" aria-hidden="true" />
-          </button>
-        )}
-      </div>
+          <div className="flex items-center gap-0.5 flex-shrink-0">
+            <button
+              type="button"
+              onClick={() => setDraftLabel(accountName(account) === account.displayName ? '' : accountName(account))}
+              className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+              title={labels.rename}
+              aria-label={labels.rename}
+            >
+              <Pencil className="w-3.5 h-3.5" />
+            </button>
+            {!account.isDefault && (
+              <button
+                type="button"
+                onClick={onSetDefault}
+                className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-amber-500 transition-colors"
+                title={labels.setDefault}
+                aria-label={labels.setDefault}
+              >
+                <Star className="w-3.5 h-3.5" />
+              </button>
+            )}
+            {canReorder && (<>
+            <button
+              type="button"
+              onClick={onMoveUp}
+              disabled={isFirst}
+              className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+              title={labels.moveUp}
+              aria-label={labels.moveUp}
+            >
+              <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={onMoveDown}
+              disabled={isLast}
+              className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+              title={labels.moveDown}
+              aria-label={labels.moveDown}
+            >
+              <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+            </>)}
+            {!isActive && (
+              <button
+                type="button"
+                onClick={onRemove}
+                className="p-1.5 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+                title={labels.remove}
+                aria-label={labels.remove}
+              >
+                <X className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }

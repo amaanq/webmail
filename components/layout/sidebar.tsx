@@ -66,6 +66,7 @@ import { useDeviceDetection, useMediaQuery } from "@/hooks/use-media-query";
 import { IconButton } from "@/components/ui/icon-button";
 import { MailboxContextMenu, type MailboxContextTarget, type MailboxNotificationActions } from "./mailbox-context-menu";
 import { useAccountStore } from '@/stores/account-store';
+import { accountName } from "@/lib/account-utils";
 import { useShallow } from "zustand/react/shallow";
 import { UNIFIED_MAILBOX_IDS, CROSS_VIEW_IDS } from '@/lib/jmap/types';
 import type { UnifiedMailboxRole } from '@/lib/jmap/types';
@@ -758,6 +759,7 @@ function SidebarSectionHeader({
   testId,
   onContextMenu,
   status,
+  description,
   onAdd,
   addTitle,
   railKey,
@@ -779,6 +781,7 @@ function SidebarSectionHeader({
   status?: ReactNode;
   /** The folded column's item for the same thing (see SidebarRow). */
   railKey?: string;
+  description?: string;
 }) {
   if (isCollapsed) {
     // One thin rule between sections. A sub-section (a shared account, the
@@ -824,8 +827,13 @@ function SidebarSectionHeader({
           <ChevronRight className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
         )}
         {icon && <span className="ms-1.5 flex-shrink-0">{icon}</span>}
-        <span className={cn(textClass, "ms-1.5")} title={label}>
-          {label}
+        <span className="ms-1.5 min-w-0 text-start" title={label}>
+          <span className={cn("block", textClass)}>{label}</span>
+          {description && (
+            <span className="block text-[0.6875rem] leading-4 font-normal text-muted-foreground truncate">
+              {description}
+            </span>
+          )}
         </span>
         {status}
       </button>
@@ -2717,10 +2725,14 @@ function SidebarImpl({
           accountGroups.map(({ account, isActive, tree, shared }) => {
             const expanded = !collapsedAccountGroups.has(account.id);
             const isViewing = isActive ? viewingAccountId === null : viewingAccountId === account.id;
+            const accountEmail = toUnicodeEmail(account.email || account.username);
+            const accountLabel = toUnicodeEmail(accountName(account)) || accountEmail;
+
             return (
               <div key={account.id} onContextMenu={isActive ? handleFoldersHeaderContextMenu : undefined}>
                 <SidebarSectionHeader
-                  label={toUnicodeEmail(account.label || account.email || account.username)}
+                  label={accountLabel}
+                  description={accountLabel !== accountEmail ? accountEmail : undefined}
                   expanded={expanded}
                   onToggle={() => toggleAccountGroup(account.id)}
                   onSettings={isActive ? openFolderSettings : undefined}

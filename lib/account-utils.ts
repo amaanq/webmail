@@ -155,6 +155,16 @@ export interface NamedAccount {
 }
 
 /**
+ * The account's name: the nickname set in the account settings, else the name
+ * the server gives. A label that is still a login address is no nickname.
+ */
+export function accountName(account: NamedAccount): string {
+  const label = account.label.trim().toLowerCase();
+  const isAddress = [account.email, account.username].some((address) => address?.trim().toLowerCase() === label);
+  return (!isAddress && account.label) || account.displayName || account.label;
+}
+
+/**
  * The bold title and the line under it for an account in a list. Usually the
  * name over the address. One person signed in to two mailboxes has the same
  * name, and often the same picture, on both, so the rows only differed in the
@@ -167,10 +177,9 @@ export function accountRowText(
   accounts: NamedAccount[],
 ): { title: string; subtitle: string | null } {
   const key = (value: string) => value.trim().toLowerCase();
-  const nameOf = (a: NamedAccount) => a.displayName || a.label;
-  const name = nameOf(account);
+  const name = accountName(account);
   const address = account.email || account.username;
-  const shared = accounts.some((a) => a.id !== account.id && key(nameOf(a)) === key(name));
+  const shared = accounts.some((a) => a.id !== account.id && key(accountName(a)) === key(name));
   if (!name || shared || key(name) === key(address)) return { title: address, subtitle: null };
   return { title: name, subtitle: address };
 }
@@ -196,7 +205,7 @@ export function accountSharesAddress(
  * "dso-ux-mail" gives "DM").
  */
 export function accountAvatarName(account: NamedAccount, accounts: NamedAccount[]): string {
-  const name = account.displayName || account.label;
+  const name = accountName(account);
   const { title, subtitle } = accountRowText(account, accounts);
   if (subtitle !== null || title !== (account.email || account.username)) return name;
   const local = title.split('@')[0] ?? title;
