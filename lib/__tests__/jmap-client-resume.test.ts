@@ -195,7 +195,7 @@ describe('JMAP resume and SSE catch-up', () => {
     expect(f.callback).toHaveBeenCalledExactlyOnceWith({ '@type': 'StateChange', changed: { A: { Email: 'missed' } } });
     f.streams.at(-1)!.close();
     await f.settle();
-    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.advanceTimersByTimeAsync(6_000);
     expect(f.streams).toHaveLength(3);
     expect(f.polls).toHaveLength(3);
     expect(f.callback).toHaveBeenCalledTimes(1);

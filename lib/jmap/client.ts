@@ -11323,6 +11323,7 @@ export class JMAPClient implements IJMAPClient {
   private reportedStates: { [key: string]: string } = {};
   private sseAbortController: AbortController | null = null;
   private sseReconnectTimeout: NodeJS.Timeout | null = null;
+  private sseReconnectAttempts = 0;
   private ssePingTimer: NodeJS.Timeout | null = null;
   private lastSSEActivity: number = 0;
   // Guards a state-change poll from stacking: the 3s interval, the secondary
@@ -11419,6 +11420,7 @@ export class JMAPClient implements IJMAPClient {
   // folder + unified/All-Mail counters from going stale between focus events.
   private static readonly SECONDARY_POLL_INTERVAL = 20_000;
   private static readonly SSE_RECONNECT_DELAY = 3_000;
+  private static readonly SSE_RECONNECT_MAX_DELAY = 60_000;
   private static readonly SSE_PING_TIMEOUT = 90_000; // 3x the 30s ping interval
   // The 30s ping interval the stream is opened with, plus slack for a late one.
   private static readonly SSE_LIVE_WINDOW = 45_000;
@@ -11548,8 +11550,9 @@ export class JMAPClient implements IJMAPClient {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    const openedAt = Date.now();
 
-    this.lastSSEActivity = Date.now();
+    this.lastSSEActivity = openedAt;
     this.startSSEPingMonitor();
 
     try {
@@ -11558,6 +11561,9 @@ export class JMAPClient implements IJMAPClient {
         if (done) break;
 
         this.lastSSEActivity = Date.now();
+        // A stream that connects and dies again keeps the backoff growing. Only
+        // one that has stayed up past the longest delay counts as recovered.
+        if (this.lastSSEActivity - openedAt > JMAPClient.SSE_RECONNECT_MAX_DELAY) this.sseReconnectAttempts = 0;
 
         buffer += decoder.decode(value, { stream: true });
         const parts = buffer.split('\n\n');
@@ -11626,9 +11632,14 @@ export class JMAPClient implements IJMAPClient {
       this.fallbackToPolling();
       return;
     }
+    const backoff = Math.min(
+      JMAPClient.SSE_RECONNECT_DELAY * 2 ** this.sseReconnectAttempts,
+      JMAPClient.SSE_RECONNECT_MAX_DELAY,
+    );
+    this.sseReconnectAttempts++;
     const delay = this.isRateLimited()
-      ? Math.max(this.rateLimitedUntil - Date.now(), JMAPClient.SSE_RECONNECT_DELAY)
-      : JMAPClient.SSE_RECONNECT_DELAY;
+      ? Math.max(this.rateLimitedUntil - Date.now(), backoff)
+      : backoff;
     this.sseReconnectTimeout = setTimeout(() => {
       if (this.isRateLimited()) {
         this.scheduleSSEReconnect();
