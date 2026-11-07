@@ -177,7 +177,7 @@ import type { PlaceholderWords } from "@/lib/placeholder-check";
 import { computeReplyThreadingHeaders } from "@/lib/email-threading";
 import { openMailImport } from "@/stores/mail-transfer-store";
 import { deliveryAddresses, resolveComposeAccountEmail } from "@/lib/reply-identity";
-import { useProMultiAccountIdentities } from "@/hooks/use-pro-multi-account-identities";
+import { useProMultiAccountIdentities, stripCrossAccountIdentityPrefix } from "@/hooks/use-pro-multi-account-identities";
 import { Filter, X, Mail, MailOpen, PenSquare, CheckSquare, Square, AlertTriangle, ArrowLeft, RefreshCw, Reply, ReplyAll, Forward, Archive, Trash2, FolderInput, ShieldAlert, ShieldCheck, Folder, Upload, Star } from "@/components/icons";
 import { useRegisterCommands } from "@/lib/command-registry";
 import { MoveToDialog, MoveToDialogHost, useMoveDialogStore } from "@/components/email/move-to-dialog";
@@ -4942,20 +4942,43 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
     };
   }, [previewAttachment]);
 
+  // A quick reply goes out through the login holding the message, as that
+  // login's identities. With the active login's alone, replying to another
+  // account's own sent message missed it as self-sent: the reply went from
+  // the active account, addressed back to the other one. Null while that
+  // login's identities are still loading.
+  const quickReplyAccount = (email: Email) => {
+    const { client: ownClient, clientAccountId } = resolveEmailBlobContext(email, client);
+    if (!ownClient) return null;
+    if (!clientAccountId || clientAccountId === activeAccountId) return { client: ownClient, identities };
+    const group = multiAccountIdentities.groups.find((g) => g.localAccountId === clientAccountId);
+    if (!group?.identities.length) return null;
+    const rawIdentities = group.identities.map((i) => ({ ...i, id: stripCrossAccountIdentityPrefix(i.id).rawId }));
+    return { client: ownClient, identities: rawIdentities };
+  };
+
   // Before an automatic sign-out: the typed quick reply is kept as a draft.
   const handleSaveQuickReplyDraft = async (body: string) => {
-    if (!client || !selectedEmail) return;
-    await saveQuickReplyDraft({ client, email: selectedEmail, identities, body, replyPrefix: t('email_composer.prefix.reply') });
+    if (!selectedEmail) return;
+    const account = quickReplyAccount(selectedEmail);
+    if (!account) return;
+    await saveQuickReplyDraft({ client: account.client, email: selectedEmail, identities: account.identities, body, replyPrefix: t('email_composer.prefix.reply') });
   };
 
   // Resolves true once the reply went out (or was scheduled), false when it
   // stopped before sending, so the quick-reply box keeps the text.
   const handleQuickReply = async (body: string, extra?: { composerId?: string }): Promise<boolean> => {
     if (!client || !selectedEmail) return false;
+    const account = quickReplyAccount(selectedEmail);
+    if (!account) {
+      await handleReply(body);
+      return true;
+    }
+    const replyClient = account.client;
 
     // Quick reply follows the composer's addressing rules and sends from the
     // address the message was delivered to (lib/outgoing/quick-reply-envelope.ts).
-    const { recipients, sendingIdentity, primaryIdentity } = quickReplyEnvelope(selectedEmail, identities);
+    const { recipients, sendingIdentity, primaryIdentity } = quickReplyEnvelope(selectedEmail, account.identities);
     if (recipients.length === 0) {
       throw new Error("No sender email found");
     }
@@ -5058,11 +5081,11 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
     const { html: finalHtmlBody, text: finalBody } = prepared;
 
     const originalEmailId = selectedEmail.id;
-    const originalSource = emailWriteSource(selectedEmail, client);
+    const originalSource = emailWriteSource(selectedEmail, replyClient);
     const sendDelaySeconds = useSettingsStore.getState().sendDelaySeconds;
     let delayedUntil: string | undefined;
     if (sendDelaySeconds > 0) {
-      if (!client.hasDelayedSend()) {
+      if (!replyClient.hasDelayedSend()) {
         // As in the composer: only a delay the user picked asks.
         const confirmed = !useSettingsStore.getState().explicitSettings.includes('sendDelaySeconds') || await confirmDialog({
           title: t('email_composer.send_delay_unsupported_title'),
@@ -5080,7 +5103,7 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
 
     // Send reply with just the body text
     const result = await sendEmail(
-      client,
+      replyClient,
       recipients,
       labelled.subject,
       finalBody,
@@ -5111,7 +5134,7 @@ export function MailApp({ linkSegments: routeSegments }: MailAppProps = {}) {
     // In the Undo window it waits until the reply really goes (mail-p2-8).
     const markAnswered = async () => {
       try {
-        await useEmailStore.getState().markEmailKeyword(client, originalEmailId, '$answered', originalSource);
+        await useEmailStore.getState().markEmailKeyword(replyClient, originalEmailId, '$answered', originalSource);
       } catch (e) {
         debug.error('Failed to set $answered keyword:', e);
       }
